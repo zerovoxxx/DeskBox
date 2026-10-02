@@ -23,6 +23,8 @@ namespace DeskBox;
 /// </summary>
 public partial class App
 {
+    private TrayContextMenuHostWindow? _trayMenuHost;
+
     private void CreateTrayIcon()
     {
         var localization = LocalizationService;
@@ -136,10 +138,9 @@ public partial class App
 
         _trayWindow = new Window();
         AppBranding.ApplyWindowIcon(_trayWindow.AppWindow);
-        // Early-logon sessions can reject these windowing calls (E_NOTIMPL is
-        // observed on IsShownInSwitchers); a 1x1 host window that leaks into
-        // Alt+Tab is the acceptable degraded state, failing startup is not.
-        WindowShellState.TryHideFromSwitchers(_trayWindow.AppWindow);
+        // HWND tool-window styles keep helper windows out of the taskbar and
+        // Alt+Tab without the shell-dependent IsShownInSwitchers call.
+        ToolWindowStyle.Apply(WindowNative.GetWindowHandle(_trayWindow));
         try
         {
             _trayWindow.AppWindow.Resize(new Windows.Graphics.SizeInt32(1, 1));
@@ -153,7 +154,6 @@ public partial class App
         {
             Icon = AppBranding.CreateTrayIcon(SettingsService.Settings.TrayIconStyle ?? "System", IsDarkThemeActive()),
             ToolTipText = localization.T("Tray.Tooltip"),
-            ContextMenuMode = ContextMenuMode.SecondWindow,
             MenuActivation = PopupActivationMode.None,
             NoLeftClickDelay = true,
             RightClickCommand = new RelayCommand(ShowTrayContextMenuFromTray),
@@ -165,8 +165,10 @@ public partial class App
                 }
             })
         };
-        _trayIcon.SecondWindowContextMenuOpened += OnSecondWindowTrayContextMenuOpened;
-        _trayIcon.ContextFlyout = contextMenu;
+        _trayMenuHost = new TrayContextMenuHostWindow(
+            contextMenu, WindowNative.GetWindowHandle(_trayWindow));
+        _trayMenuHost.Opened += OnTrayContextMenuHostOpened;
+        ThemeService.TrackWindow(_trayMenuHost);
 
         if (_trayWindow.Content is null)
         {
@@ -249,8 +251,7 @@ public partial class App
 
     /// <summary>
     /// Creates the tray icon, retrying through the early-logon race that makes
-    /// the first attempt fail (H.NotifyIcon TryCreate failures and E_NOTIMPL
-    /// windowing calls both recover once the shell finishes starting). The
+    /// the first Shell_NotifyIcon registration fail before Explorer is ready. The
     /// first attempt runs inline so the normal path is unchanged; later
     /// attempts continue on the UI thread while the rest of startup proceeds.
     /// </summary>
@@ -410,19 +411,19 @@ public partial class App
     {
         if (sender is MenuFlyoutItemBase anchorItem)
         {
-            ApplySecondWindowTrayPresenterSettings(anchorItem);
+            ApplyTrayPresenterSettings(anchorItem);
         }
     }
 
-    private void OnSecondWindowTrayContextMenuOpened(object? sender, EventArgs args)
+    private void OnTrayContextMenuHostOpened(object? sender, EventArgs args)
     {
         if (_trayOrganizeDesktopItem is not null)
         {
-            ApplySecondWindowTrayPresenterSettings(_trayOrganizeDesktopItem);
+            ApplyTrayPresenterSettings(_trayOrganizeDesktopItem);
         }
     }
 
-    private void ApplySecondWindowTrayPresenterSettings(MenuFlyoutItemBase anchorItem)
+    private void ApplyTrayPresenterSettings(MenuFlyoutItemBase anchorItem)
     {
         MenuFlyoutPresenter? presenter = FindVisualAncestor<MenuFlyoutPresenter>(anchorItem);
         if (presenter is null)
@@ -437,10 +438,10 @@ public partial class App
         presenter.MaxHeight = double.PositiveInfinity;
 
         bool popupConfigured = ConfigureOwningPopup(presenter);
-        if (!_traySecondWindowSyncLogged)
+        if (!_trayPresenterSyncLogged)
         {
-            Log($"[Tray] Synchronized SecondWindow presenter through public visual tree; popup={popupConfigured}");
-            _traySecondWindowSyncLogged = true;
+            Log($"[Tray] Synchronized owned tray menu presenter through public visual tree; popup={popupConfigured}");
+            _trayPresenterSyncLogged = true;
         }
     }
 
@@ -530,7 +531,7 @@ public partial class App
 
         try
         {
-            _trayIcon.ShowContextMenu(point);
+            _trayMenuHost?.ShowMenu(point);
             _trayContextMenuModePolicy.RecordSuccess();
         }
         catch (Exception ex) when (IsSecondWindowHostFailure(ex))
@@ -588,11 +589,11 @@ public partial class App
 
         try
         {
-            // Re-assigning the flyout makes the library rebuild its hidden
-            // second window from scratch; the replaced window leaks once,
-            // which beta.1 makes unavoidable for this one-shot retry.
-            trayIcon.ContextFlyout = null;
-            trayIcon.ContextFlyout = _trayContextMenu;
+            _trayMenuHost?.Dispose();
+            _trayMenuHost = new TrayContextMenuHostWindow(
+                _trayContextMenu!, WindowNative.GetWindowHandle(_trayWindow!));
+            _trayMenuHost.Opened += OnTrayContextMenuHostOpened;
+            ThemeService.TrackWindow(_trayMenuHost);
         }
         catch (Exception ex)
         {
@@ -607,7 +608,7 @@ public partial class App
 
         try
         {
-            trayIcon.ShowContextMenu(point);
+            _trayMenuHost?.ShowMenu(point);
             _trayContextMenuModePolicy.RecordSuccess();
         }
         catch (Exception ex) when (IsSecondWindowHostFailure(ex))
@@ -629,6 +630,8 @@ public partial class App
         try
         {
             trayIcon.ContextMenuMode = ContextMenuMode.PopupMenu;
+            // PopupMenu does not initialize H.NotifyIcon's SecondWindow host.
+            trayIcon.ContextFlyout = _trayContextMenu;
             Log("[Tray] Tray context menu degraded to native PopupMenu mode (SecondWindow host failed to initialize)");
             ShowTrayContextMenuInNativeMode(point);
         }

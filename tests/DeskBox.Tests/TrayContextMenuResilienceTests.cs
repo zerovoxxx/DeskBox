@@ -114,15 +114,18 @@ public sealed class TrayContextMenuResilienceTests
             tray,
             "private void RecoverTrayContextMenuAfterSecondWindowFailure",
             "private void DegradeTrayContextMenuToNativeMode");
-        // Tier 2: re-assigning the flyout makes the library recreate the host.
-        Assert.Contains("ContextFlyout = null;", recovery, StringComparison.Ordinal);
-        Assert.Contains("ContextFlyout = _trayContextMenu;", recovery, StringComparison.Ordinal);
+        // Tier 2 rebuilds the owned host without entering H.NotifyIcon's host.
+        Assert.Contains("_trayMenuHost?.Dispose();", recovery, StringComparison.Ordinal);
+        Assert.Contains("new TrayContextMenuHostWindow(", recovery, StringComparison.Ordinal);
+        Assert.DoesNotContain("ContextFlyout =", recovery, StringComparison.Ordinal);
 
         string degrade = Slice(
             tray,
             "private void DegradeTrayContextMenuToNativeMode",
             "internal void ShowTrayContextMenuForOnboarding");
         Assert.Contains("ContextMenuMode = ContextMenuMode.PopupMenu;", degrade, StringComparison.Ordinal);
+        Assert.True(degrade.IndexOf("ContextMenuMode = ContextMenuMode.PopupMenu;", StringComparison.Ordinal) <
+                    degrade.IndexOf("ContextFlyout = _trayContextMenu;", StringComparison.Ordinal));
         Assert.Contains(
             "[Tray] Tray context menu degraded to native PopupMenu mode (SecondWindow host failed to initialize)",
             degrade,
