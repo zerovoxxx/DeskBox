@@ -4,6 +4,17 @@
 # Bypass intentionally with `git commit --no-verify` when a real human
 # co-author is wanted.
 msg_file="$1"
+expected_ident='zerovoxxx <48088758+zerovoxxx@users.noreply.github.com>'
+for role in AUTHOR COMMITTER; do
+    ident=$(git var "GIT_${role}_IDENT") || exit 1
+    case "$ident" in
+        "$expected_ident "*) ;;
+        *)
+            echo "commit-msg: ${role} identity must be ${expected_ident}." >&2
+            exit 1
+            ;;
+    esac
+done
 if grep -nEi '^\s*(co-authored-by|generated[ -]with|generated-by)\s*[: ]' "$msg_file" >/dev/null; then
     echo "commit-msg: forbidden attribution trailer (Co-Authored-By / Generated with)." >&2
     echo "This repository requires single-account commits. Remove the trailer and retry." >&2
