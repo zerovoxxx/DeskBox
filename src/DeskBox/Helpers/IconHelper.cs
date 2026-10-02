@@ -101,8 +101,12 @@ public static class IconHelper
         string Path,
         int IconIndex = 0,
         bool UsesExplicitIconIndex = false,
-        bool UsesShellItemIcon = false);
-    private sealed record ResolvedIconSource(IconSource Source, string CacheKey);
+        bool UsesShellItemIcon = false)
+    {
+        public bool IsTransientFallback { get; init; }
+    }
+    private sealed record ResolvedIconSource(
+        IconSource Source, string CacheKey, bool IsTransientFallback = false);
 
     private const long ShellInvalidateThrottleMs = 500;
     private static long s_lastShellInvalidateMs;
@@ -162,6 +166,13 @@ public static class IconHelper
                 path,
                 hideShortcutArrowOverlay);
         IconSource iconSource = resolvedIconSource.Source;
+        if (resolvedIconSource.IsTransientFallback)
+        {
+            // A timed-out metadata read is not an authoritative Shell icon.
+            // Returning null keeps the item in the hydration retry set instead
+            // of caching a generic white page as a successful application icon.
+            return null;
+        }
         if (string.IsNullOrWhiteSpace(iconSource.Path))
         {
             return null;
@@ -1170,6 +1181,12 @@ public static class IconHelper
                 {
                     bytes = loadResult.Value;
                     s_iconBytesTimeouts.TryRemove(iconBytesCacheKey, out _);
+                    if (isShortcutPath && loadIconSource.UsesExplicitIconIndex && bytes is { Length: > 0 })
+                    {
+                        App.LogVerbose(
+                            $"[IconHelper] Loaded explicit shortcut icon source={originalSourcePath} " +
+                            $"resource={loadIconSource.Path} index={loadIconSource.IconIndex}");
+                    }
                 }
                 else if (loadResult.Status == BoundedBackgroundWorkStatus.ExecutionTimedOut)
                 {
@@ -1203,15 +1220,13 @@ public static class IconHelper
             if (bytes is not { Length: > 0 } &&
                 loadIconSource.UsesExplicitIconIndex)
             {
-                // An explicit icon index can name a resource no extractor can
-                // satisfy (a packed executable, a stripped resource section):
-                // both the Shell item route above and the indexed extraction
-                // answer null for the same source, and because null results
-                // are never cached the tile stays blank across restarts. The
-                // Shell item still resolves a default frame for such a file;
-                // a default icon beats a permanently blank tile, and only a
-                // successful recovery is cached.
-                bytes = await TryLoadFileShellItemIconAsync(loadIconSource.Path);
+                // Ask the shortcut itself if indexed extraction fails. A DLL
+                // or extensionless MSI icon queried as a file yields a generic
+                // document icon, even though the shortcut has a valid icon.
+                bytes = isShortcutPath
+                    ? await TryLoadHighResolutionShellItemIconAsync(
+                        originalSourcePath, includeOverlays: !hideShortcutArrowOverlay)
+                    : await TryLoadFileShellItemIconAsync(loadIconSource.Path);
                 if (bytes is { Length: > 0 })
                 {
                     StoreCachedIconBytes(iconBytesCacheKey, bytes);
@@ -1442,13 +1457,11 @@ public static class IconHelper
         {
             if (iconSource.UsesExplicitIconIndex)
             {
-                var indexedBytes = LoadIndexedIconBytes(
+                // Do not silently promote SHGetFileInfo's file-type icon to
+                // the result of an indexed resource request.
+                return LoadIndexedIconBytes(
                     iconSource,
                     rejectPaddedShortcutIcon);
-                if (indexedBytes is not null)
-                {
-                    return indexedBytes;
-                }
             }
 
             // Shell's Jumbo image list can contain a 32/48 px icon that has already
@@ -1600,6 +1613,11 @@ public static class IconHelper
         IconSource iconSource,
         bool rejectPaddedShortcutIcon = false)
     {
+        byte[]? iconFileBytes = TryLoadIconFileBytes(iconSource.Path, rejectPaddedShortcutIcon);
+        if (iconFileBytes is not null)
+        {
+            return iconFileBytes;
+        }
         // Try ShellIconNativeMethods.SHDefExtractIcon first — it can extract 256×256 icons from exe/dll/ico resources.
         byte[]? hiResBytes = TryExtractHighResIndexedIcon(
             iconSource.Path,
@@ -1658,6 +1676,33 @@ public static class IconHelper
             {
                 ShellIconNativeMethods.DestroyIcon(smallIcons[0]);
             }
+        }
+    }
+
+    internal static byte[]? TryLoadIconFileBytes(string path, bool rejectPaddedShortcutIcon = false)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            Span<byte> header = stackalloc byte[6];
+            stream.ReadExactly(header);
+            if (header[0] != 0 || header[1] != 0 || header[2] != 1 || header[3] != 0 ||
+                (header[4] == 0 && header[5] == 0))
+            {
+                return null;
+            }
+
+            // Windows Installer stores ICO files without an .ico extension.
+            // Read the file format rather than its file-type association.
+            stream.Position = 0;
+            using var icon = new Icon(stream, 256, 256);
+            using var bitmap = icon.ToBitmap();
+            return EncodeIconBitmapAsPng(bitmap, rejectPaddedShortcutIcon);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or ExternalException)
+        {
+            return null;
         }
     }
 
@@ -1787,7 +1832,8 @@ public static class IconHelper
                         hideShortcutArrowOverlay);
                     return new ResolvedIconSource(
                         source,
-                        BuildCacheKey(normalizedSourcePath, source));
+                        BuildCacheKey(normalizedSourcePath, source),
+                        IsTransientFallback: source.IsTransientFallback);
                 },
                 IconSourceResolutionTimeout);
 
@@ -1987,7 +2033,8 @@ public static class IconHelper
             $"{BuildSourceCachePrefix(normalizedSourcePath)}fallback:" +
             (ShortcutHelper.IsShortcutPath(normalizedSourcePath)
                 ? "shell-item"
-                : "direct"));
+                : "direct"),
+            IsTransientFallback: ShortcutHelper.IsShortcutPath(normalizedSourcePath));
 
     private static string NormalizeSourcePath(string path)
     {
@@ -2209,32 +2256,32 @@ public static class IconHelper
             return new IconSource(path);
         }
 
+        ShortcutIconResourceReader.IconResource? storedIcon =
+            ShortcutHelper.IsShellLinkPath(path) ? ShortcutIconResourceReader.TryRead(path) : null;
+        IconSource? storedIconSource = storedIcon is { } resource
+            ? ResolveExplicitIconSource(path, resource.Path, resource.Index)
+            : null;
+        if (storedIconSource is not null)
+        {
+            return storedIconSource;
+        }
+
         var shortcut = ShortcutHelper.ReadStoredMetadata(path);
 
         if (shortcut is null)
         {
-            return new IconSource(path, UsesShellItemIcon: true);
+            return new IconSource(path, UsesShellItemIcon: true) { IsTransientFallback = true };
         }
 
-        // Parse icon location — may contain a comma-separated index (e.g. "steam.exe,0")
-        var (iconFilePath, iconFileIndex) = SplitIconLocation(shortcut.IconLocation);
+        IconSource? explicitSource = ResolveExplicitIconSource(
+            path, shortcut.IconLocation, shortcut.IconIndex);
+        if (explicitSource is not null)
+        {
+            return explicitSource;
+        }
+
+        var (iconFilePath, _) = SplitIconLocation(shortcut.IconLocation);
         string? iconLocation = NormalizeIconLocation(iconFilePath);
-        int resolvedIconIndex = iconFileIndex ?? shortcut.IconIndex;
-
-        if (!string.IsNullOrWhiteSpace(iconLocation) &&
-            TryResolveRelativeIconLocation(
-                path,
-                iconLocation,
-                out string resolvedRelativeIconLocation))
-        {
-            iconLocation = resolvedRelativeIconLocation;
-        }
-
-        if (!string.IsNullOrWhiteSpace(iconLocation) &&
-            File.Exists(iconLocation))
-        {
-            return new IconSource(iconLocation, resolvedIconIndex, UsesExplicitIconIndex: true);
-        }
 
         // For Steam .url shortcuts, the IconFile may point to a steam.exe path
         // that doesn't exist on this machine. Try to locate steam.exe via registry.
@@ -2246,6 +2293,44 @@ public static class IconHelper
             {
                 return new IconSource(steamExe, 0, UsesExplicitIconIndex: true);
             }
+        }
+
+        // Keep a missing resource retryable; its drive or file can become
+        // available after logon without the shortcut itself being modified.
+        if (storedIcon is not null || !string.IsNullOrWhiteSpace(iconLocation))
+        {
+            return new IconSource(path, UsesShellItemIcon: true) { IsTransientFallback = true };
+        }
+
+        string targetPath = Environment.ExpandEnvironmentVariables(shortcut.TargetPath);
+        if (!string.IsNullOrWhiteSpace(targetPath) &&
+            (File.Exists(targetPath) || Directory.Exists(targetPath)))
+        {
+            return new IconSource(targetPath);
+        }
+
+        return new IconSource(path, UsesShellItemIcon: true);
+    }
+
+    private static IconSource? ResolveExplicitIconSource(string shortcutPath, string iconPath, int iconIndex)
+    {
+        var (iconFilePath, iconFileIndex) = SplitIconLocation(iconPath);
+        string? iconLocation = NormalizeIconLocation(iconFilePath);
+        int resolvedIconIndex = iconFileIndex ?? iconIndex;
+
+        if (!string.IsNullOrWhiteSpace(iconLocation) &&
+            TryResolveRelativeIconLocation(
+                shortcutPath,
+                iconLocation,
+                out string resolvedRelativeIconLocation))
+        {
+            iconLocation = resolvedRelativeIconLocation;
+        }
+
+        if (!string.IsNullOrWhiteSpace(iconLocation) &&
+            File.Exists(iconLocation))
+        {
+            return new IconSource(iconLocation, resolvedIconIndex, UsesExplicitIconIndex: true);
         }
 
         // If the icon location references an .exe/.dll/.ico that doesn't exist,
@@ -2260,13 +2345,7 @@ public static class IconHelper
             }
         }
 
-        if (!string.IsNullOrWhiteSpace(shortcut.TargetPath) &&
-            (File.Exists(shortcut.TargetPath) || Directory.Exists(shortcut.TargetPath)))
-        {
-            return new IconSource(shortcut.TargetPath);
-        }
-
-        return new IconSource(path, UsesShellItemIcon: true);
+        return null;
     }
 
     internal static bool TryResolveRelativeIconLocation(
@@ -2486,12 +2565,14 @@ public static class IconHelper
         }
 
         string extension = Path.GetExtension(resolvedPath);
-        if (string.IsNullOrWhiteSpace(extension))
+        if (string.IsNullOrWhiteSpace(extension) &&
+            !iconSource.UsesExplicitIconIndex && !ShortcutHelper.IsShortcutPath(sourcePath))
         {
             return $"{sourceCachePrefix}path:{resolvedPath}";
         }
 
-        if (extension.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
+        if (iconSource.UsesExplicitIconIndex ||
+            extension.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
             extension.Equals(".ico", StringComparison.OrdinalIgnoreCase) ||
             ShortcutHelper.IsShortcutPath(sourcePath))
         {

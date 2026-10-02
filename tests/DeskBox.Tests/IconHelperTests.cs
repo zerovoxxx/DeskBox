@@ -333,7 +333,11 @@ public class IconHelperTests
         fallbackBlock = fallbackBlock[..recoveryIndex];
 
         Assert.Contains(
-            "bytes = await TryLoadFileShellItemIconAsync(loadIconSource.Path);",
+            "originalSourcePath, includeOverlays: !hideShortcutArrowOverlay)",
+            fallbackBlock,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ": await TryLoadFileShellItemIconAsync(loadIconSource.Path);",
             fallbackBlock,
             StringComparison.Ordinal);
         int guardIndex = fallbackBlock.IndexOf(
@@ -352,7 +356,7 @@ public class IconHelperTests
     {
         string iconLibraryPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "imageres.dll");
+            "shell32.dll");
         Assert.True(
             File.Exists(iconLibraryPath),
             "imageres.dll is required to exercise the indexed icon channel.");
@@ -381,7 +385,7 @@ public class IconHelperTests
 
         Assert.True(
             requestedIndex > 0,
-            "No imageres.dll frame between index 1 and 12 differed from the index 0 frame.");
+            "No shell32.dll frame between index 1 and 12 differed from the index 0 frame.");
         byte[]? indexedFrame = InvokeIconBytesMethod(
             "LoadIndexedIconBytes",
             CreateExplicitIconSource(iconLibraryPath, requestedIndex));

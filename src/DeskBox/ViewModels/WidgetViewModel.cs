@@ -16,12 +16,15 @@ public partial class WidgetViewModel : ObservableObject, IDisposable
 {
     private const int IncrementalRefreshBatchThreshold = 24;
     private const int IconHydrationBatchSize = 8;
-    private const int IconHydrationRetryCount = 3;
+    private const int IconHydrationRetryCount = 4;
     private static readonly TimeSpan[] s_iconHydrationRetryDelays =
     [
         TimeSpan.FromMilliseconds(450),
         TimeSpan.FromMilliseconds(1200),
-        TimeSpan.FromMilliseconds(2600)
+        TimeSpan.FromMilliseconds(2600),
+        // Cross the Shell 30-second failure backoff once. Only items
+        // that still have no icon participate; successful tiles are untouched.
+        TimeSpan.FromSeconds(31)
     ];
     private const int FolderCountHydrationBatchSize = 8;
     private const int ShortcutTargetHydrationBatchSize = 4;

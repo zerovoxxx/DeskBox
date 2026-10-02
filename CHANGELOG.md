@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.5.6.1 - 2026-10-02
+
+- Fix recurring blank shortcut icons by reading persisted `.lnk` icon resources before Shell metadata, including Hyper-V environment-variable resources and extensionless Windows Installer ICO files.
+- Keep transient shortcut resolution failures out of the successful icon caches and retry unresolved items after the Shell failure backoff.
+- Include icon indexes and resource changes in cache keys for extensionless explicit icon resources.
+- Preserve the local logon tray host fix when integrating the latest upstream tray recovery policy.
+
+- 修复快捷方式图标反复变白：优先读取 `.lnk` 保存的图标资源，支持 Hyper-V 的环境变量资源和 Windows Installer 的无扩展名 ICO 文件。
+- 临时解析失败不再作为成功图标缓存；未解析的图标在 Shell 失败退避结束后重试。
+- 无扩展名显式图标资源的缓存键包含图标索引及文件变化。
+- 合并最新官方源码时保留本地登录阶段托盘窗口修复。
+
 ## Unreleased
 
 ### English

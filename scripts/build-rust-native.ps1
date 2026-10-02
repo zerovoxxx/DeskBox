@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).ProviderPath
 $manifestPath = Join-Path $repoRoot "native\Cargo.toml"
 $targetTriple = if ($Platform -eq "ARM64") {
     "aarch64-pc-windows-msvc"
