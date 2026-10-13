@@ -2,8 +2,15 @@ namespace DeskBox.Tests;
 
 internal static class TestPaths
 {
+    private static readonly string RepositoryRoot = FindRepositoryRoot();
+
     public static string FromRepository(string relativePath) =>
-        Path.Combine(FindRepositoryRoot(), relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Path.Combine(RepositoryRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    public static string DotnetWorkingDirectory =>
+        string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DOTNET_MSBUILD_SDK_RESOLVER_SDKS_DIR"))
+            ? RepositoryRoot
+            : Path.GetTempPath();
 
     private static string FindRepositoryRoot()
     {

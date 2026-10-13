@@ -16,7 +16,6 @@ public static class ServiceRegistry
     {
         // ── Core infrastructure ──────────────────────────────────────────
         services.AddSingleton<SettingsService>();
-        services.AddSingleton<SettingsMigrationPipeline>();
         services.AddSingleton<DeskBoxDataBackupService>();
         services.AddSingleton<ICredentialStore>(_ => new PasswordVaultCredentialStore());
         services.AddSingleton<CloudBackupService>(sp =>
@@ -35,13 +34,11 @@ public static class ServiceRegistry
             new OrganizerService(
                 sp.GetRequiredService<SettingsService>(),
                 sp.GetRequiredService<FileService>()));
-        services.AddSingleton<QuickCaptureService>(_ => new QuickCaptureService());
+        services.AddSingleton<QuickCaptureService>(sp => new QuickCaptureService(
+            recycleAttachmentFileAsync: path =>
+                sp.GetRequiredService<FileService>().DeleteEntryAsync(path, recycle: true)));
         services.AddSingleton<LocalizationService>();
         services.AddSingleton<ThemeService>();
-
-        // ── Weather ──────────────────────────────────────────────────────
-        services.AddSingleton<WeatherService>();
-        services.AddSingleton<CitySearchService>();
 
         // ── Update (factory-based) ───────────────────────────────────────
         services.AddSingleton<IAppUpdateService>(_ =>

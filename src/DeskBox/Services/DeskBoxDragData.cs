@@ -198,40 +198,6 @@ public static class DeskBoxDragData
                 ? dataView.RequestedOperation
                 : allowedOperations;
 
-    public static bool ShouldShowImportOverlay(
-        IReadOnlyList<string> paths)
-    {
-        const long ThresholdBytes = 10 * 1024 * 1024;
-
-        long totalSize = 0;
-        foreach (string path in paths)
-        {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    totalSize += new FileInfo(path).Length;
-                }
-                else if (Directory.Exists(path))
-                {
-                    // Avoid recursively enumerating a folder on the UI path.
-                    return true;
-                }
-            }
-            catch
-            {
-                return true;
-            }
-
-            if (totalSize >= ThresholdBytes)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     public static async Task<DroppedFileBatch> TryGetDroppedFilesAsync(DataPackageView dataView)
     {
         IReadOnlyList<DroppedFilePath> internalFiles =

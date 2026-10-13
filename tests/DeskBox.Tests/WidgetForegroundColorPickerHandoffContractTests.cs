@@ -35,35 +35,6 @@ public sealed class WidgetForegroundColorPickerHandoffContractTests
     }
 
     [Fact]
-    public void ForegroundColorPicker_QuickCaptureChainHoldsInteractionAcrossMenuTransition()
-    {
-        string source = File.ReadAllText(TestPaths.FromRepository(
-            "src/DeskBox/Views/QuickCaptureWidgetWindow.Menus.cs"));
-
-        Assert.Contains(
-            "pickerHandoff ??= AcquireFlyoutHandoff(\"quick-color-picker-handoff\");",
-            source,
-            StringComparison.Ordinal);
-
-        string closedHandler = ExtractSection(
-            source,
-            "bool showForegroundColorPickerWhenClosed = false;",
-            "flyout.Items.Add(renameItem);");
-        Assert.Contains(
-            "QueueInteractionGuardedShow(",
-            closedHandler,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "BuildWidgetForegroundColorPickerFlyout(),",
-            closedHandler,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "pickerHandoff,",
-            closedHandler,
-            StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ForegroundColorPicker_SharedHandoffReleasesOnlyAfterSuccessorAcquiresLease()
     {
         string source = File.ReadAllText(TestPaths.FromRepository(
@@ -118,6 +89,40 @@ public sealed class WidgetForegroundColorPickerHandoffContractTests
             StringComparison.Ordinal)..];
         Assert.Contains("EndCompactInteraction();", rollback, StringComparison.Ordinal);
         Assert.Contains("EndWidgetInteraction(", rollback, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ForegroundColorPicker_ContentChainReleasesHandoffWhenAnotherActionWinsDismissal()
+    {
+        string source = File.ReadAllText(TestPaths.FromRepository(
+            "src/DeskBox/Views/ContentWidgetWindow.Commands.cs"));
+
+        string closedHandler = ExtractSection(
+            source,
+            "bool showForegroundColorPickerWhenClosed = false;",
+            "flyout.Items.Add(rename);");
+
+        // The custom color entry is a toggle item, so it keeps the menu open
+        // (#437): rename, disable, or settings can still win the dismissal
+        // after the picker handoff was armed. Every branch must run inside a
+        // finally that disposes whichever handoff it did not queue, or the
+        // compact lease leaks and a Smart capsule stays expanded forever.
+        Assert.Contains(
+            "pickerHandoff?.Dispose();",
+            closedHandler,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "closeWidgetFlyoutHandoff?.Dispose();",
+            closedHandler,
+            StringComparison.Ordinal);
+        Assert.True(
+            closedHandler.IndexOf("QueueInteractionGuardedFlyout(", StringComparison.Ordinal) <
+            closedHandler.IndexOf("finally", StringComparison.Ordinal));
+        // A consumed handoff is nulled by its own branch before the finally,
+        // so the guard only ever releases the unconsumed one.
+        Assert.True(
+            closedHandler.IndexOf("pickerHandoff = null;", StringComparison.Ordinal) <
+            closedHandler.IndexOf("pickerHandoff?.Dispose();", StringComparison.Ordinal));
     }
 
     private static string ExtractSection(

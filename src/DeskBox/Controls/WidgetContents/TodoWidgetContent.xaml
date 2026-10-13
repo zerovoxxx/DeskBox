@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:DeskBox.Controls"
+    xmlns:helpers="using:DeskBox.Helpers"
     xmlns:toolkit="using:CommunityToolkit.WinUI.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -11,7 +12,8 @@
     KeyDown="TodoWidgetContent_KeyDown"
     IsTabStop="True"
     SizeChanged="TodoWidgetContent_SizeChanged"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+    xmlns:svc="using:DeskBox.Services">
 
     <UserControl.Resources>
         <x:Double x:Key="TodoDetailActionIconSize">13</x:Double>
@@ -68,16 +70,6 @@
             <Setter Property="CornerRadius" Value="{StaticResource WidgetCornerRadiusSmall}" />
         </Style>
 
-        <Style x:Key="TodoCardIconButtonStyle" TargetType="Button" BasedOn="{StaticResource SubtleButtonStyle}">
-            <Setter Property="Width" Value="32" />
-            <Setter Property="Height" Value="32" />
-            <Setter Property="MinWidth" Value="32" />
-            <Setter Property="MinHeight" Value="32" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="CornerRadius" Value="{StaticResource WidgetCornerRadiusSmall}" />
-        </Style>
-
         <Style x:Key="TodoDetailHeaderIconButtonStyle" TargetType="Button" BasedOn="{StaticResource SubtleButtonStyle}">
             <Setter Property="Width" Value="28" />
             <Setter Property="Height" Value="28" />
@@ -123,13 +115,6 @@
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="CornerRadius" Value="0" />
-        </Style>
-
-        <Style x:Key="TodoDetailGroupStyle" TargetType="Border">
-            <Setter Property="Background" Value="{ThemeResource WidgetLayerFillSecondaryBrush}" />
-            <Setter Property="BorderBrush" Value="{ThemeResource WidgetLayerStrokeBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="{StaticResource WidgetCornerRadiusSmall}" />
         </Style>
 
         <Style x:Key="TodoDetailTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource WidgetBorderlessInputTextBoxStyle}">
@@ -382,6 +367,7 @@
                                     Opacity="{Binding ContentOpacity}"
                                     Spacing="2">
                                     <TextBlock
+                                        helpers:WidgetTextShadow.Cast="True"
                                         FontSize="{Binding ElementName=TodoListView, Path=DataContext.TextSize}"
                                         LineHeight="{Binding ElementName=TodoListView, Path=DataContext.ItemTextLineHeight}"
                                         LineStackingStrategy="BlockLineHeight"
@@ -393,6 +379,7 @@
 
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <TextBlock
+                                            helpers:WidgetTextShadow.Cast="True"
                                             FontSize="{Binding ElementName=TodoListView, Path=DataContext.SecondaryTextSize}"
                                             Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                             MaxLines="1"
@@ -400,15 +387,16 @@
                                             TextTrimming="CharacterEllipsis"
                                             Visibility="{Binding DueStatusNormalVisibility}" />
                                         <TextBlock
+                                            helpers:WidgetTextShadow.Cast="True"
                                             FontSize="{Binding ElementName=TodoListView, Path=DataContext.SecondaryTextSize}"
-                                            Foreground="#F7630C"
+                                            Foreground="{ThemeResource SystemFillColorCautionBrush}"
                                             MaxLines="1"
                                             Text="{Binding DueStatusText}"
                                             TextTrimming="CharacterEllipsis"
                                             Visibility="{Binding DueStatusOverdueVisibility}" />
                                         <StackPanel Orientation="Horizontal" Spacing="2" Visibility="{Binding AttachmentSummaryVisibility}">
                                             <FontIcon FontSize="{Binding ElementName=TodoListView, Path=DataContext.SmallIconSize}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Glyph="&#xE723;" />
-                                            <TextBlock FontSize="{Binding ElementName=TodoListView, Path=DataContext.SecondaryTextSize}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Text="{Binding AttachmentSummaryText}" />
+                                            <TextBlock helpers:WidgetTextShadow.Cast="True" FontSize="{Binding ElementName=TodoListView, Path=DataContext.SecondaryTextSize}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Text="{Binding AttachmentSummaryText}" />
                                         </StackPanel>
                                     </StackPanel>
 
@@ -421,7 +409,7 @@
                                         Visibility="{Binding RecurringHistoryToggleVisibility}">
                                         <StackPanel Orientation="Horizontal" Spacing="4">
                                             <FontIcon FontSize="{Binding ElementName=TodoListView, Path=DataContext.SmallIconSize}" Glyph="{Binding RecurringHistoryToggleGlyph}" />
-                                            <TextBlock FontSize="{Binding ElementName=TodoListView, Path=DataContext.SecondaryTextSize}" Text="{Binding RecurringHistoryToggleText}" />
+                                            <TextBlock helpers:WidgetTextShadow.Cast="True" FontSize="{Binding ElementName=TodoListView, Path=DataContext.SecondaryTextSize}" Text="{Binding RecurringHistoryToggleText}" />
                                         </StackPanel>
                                     </Button>
                                 </StackPanel>
@@ -483,15 +471,16 @@
                     FontSize="24"
                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                     Glyph="&#xE73E;"
-                    Opacity="0.72"
                     Style="{StaticResource WidgetEmptyStateIconStyle}" />
                 <TextBlock
+                    helpers:WidgetTextShadow.Cast="True"
                     FontSize="{Binding TitleTextSize}"
                     FontWeight="SemiBold"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{StaticResource WidgetEmptyStateTitleTextStyle}"
                     Text="{Binding EmptyStateTitle}" />
                 <TextBlock
+                    helpers:WidgetTextShadow.Cast="True"
                     FontSize="{Binding SecondaryTextSize}"
                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                     Style="{StaticResource WidgetEmptyStateDescriptionTextStyle}"
@@ -812,7 +801,7 @@
                                             VerticalAlignment="Center"
                                             Click="DetailStepCheckBox_Click"
                                             IsChecked="{Binding IsCompleted, Mode=OneWay}" />
-                                        <TextBox
+                                        <TextBox svc:Localized.AutomationNameKey="Todo.Detail.EditStep"
                                             x:Name="DetailStepTextBox"
                                             Grid.Column="1"
                                             MinHeight="32"
@@ -825,7 +814,7 @@
                                             LostFocus="DetailStepTextBox_LostFocus"
                                             Opacity="{Binding ContentOpacity}"
                                             Text="{Binding Text, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                        <Button
+                                        <Button AutomationProperties.Name="{Binding ElementName=RootGrid, Path=DataContext.DeleteText}"
                                             x:Name="DetailDeleteStepButton"
                                             Grid.Column="2"
                                             Width="28"
@@ -858,7 +847,7 @@
                                 FontSize="{Binding ElementName=RootGrid, Path=DataContext.ContentTextSize}"
                                 KeyDown="DetailNewStepTextBox_KeyDown"
                                 PlaceholderText="{Binding ElementName=RootGrid, Path=DataContext.DetailAddStepText}" />
-                            <Button
+                            <Button AutomationProperties.Name="{Binding ElementName=RootGrid, Path=DataContext.DetailAddStepText}"
                                 Grid.Column="1"
                                 Width="32"
                                 Height="32"
@@ -1042,15 +1031,16 @@
                 <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                     <TextBlock x:Name="CustomDueDateTitleText" FontSize="{Binding TextSize}" Style="{StaticResource WidgetInlineEditorTitleTextStyle}" />
-                    <Button x:Name="CustomDueDateCloseButton" Grid.Column="1" Click="CustomDueDateCancelButton_Click" Style="{StaticResource WidgetInlineEditorCloseButtonStyle}"><FontIcon FontSize="10" Glyph="&#xE711;" /></Button>
+                    <Button svc:Localized.AutomationNameKey="Common.Close" x:Name="CustomDueDateCloseButton" Grid.Column="1" Click="CustomDueDateCancelButton_Click" Style="{StaticResource WidgetInlineEditorCloseButtonStyle}"><FontIcon FontSize="10" Glyph="&#xE711;" /></Button>
                 </Grid>
-                <CalendarDatePicker x:Name="CustomDueDatePicker" Grid.Row="1" Height="36" MinHeight="36" MinWidth="0" HorizontalAlignment="Stretch" />
-                <Button x:Name="CustomDueTimeButton" Grid.Row="2" Click="CustomDueTimeButton_Click" FontSize="{Binding FilterTextSize}" HorizontalAlignment="Stretch" Style="{StaticResource DefaultButtonStyle}">
+                <CalendarDatePicker svc:Localized.AutomationNameKey="Todo.Due.Custom" x:Name="CustomDueDatePicker" Grid.Row="1" Height="36" MinHeight="36" MinWidth="0" HorizontalAlignment="Stretch" />
+                <Button svc:Localized.AutomationNameKey="Todo.Due.Custom.Time" x:Name="CustomDueTimeButton" Grid.Row="2" Click="CustomDueTimeButton_Click" FontSize="{Binding FilterTextSize}" HorizontalAlignment="Stretch" Style="{StaticResource DefaultButtonStyle}">
                     <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock x:Name="CustomDueTimeText" VerticalAlignment="Center" /><FontIcon Grid.Column="1" FontSize="12" Glyph="&#xE916;" /></Grid>
                 </Button>
                 <StackPanel Grid.Row="3" HorizontalAlignment="Right" Orientation="Horizontal" Spacing="8">
-                    <Button x:Name="CustomDueDateCancelButton" Click="CustomDueDateCancelButton_Click" FontSize="{Binding FilterTextSize}" Style="{StaticResource WidgetEditorCommandButtonStyle}" />
-                    <Button x:Name="CustomDueDateSaveButton" Click="CustomDueDateSaveButton_Click" FontSize="{Binding FilterTextSize}" Style="{StaticResource WidgetEditorCommandButtonStyle}" />
+                    <!-- Affirmative (Save) on the left, matching the app-wide ContentDialog convention. -->
+                    <Button svc:Localized.AutomationNameKey="Common.Save" x:Name="CustomDueDateSaveButton" Click="CustomDueDateSaveButton_Click" FontSize="{Binding FilterTextSize}" Style="{StaticResource WidgetEditorCommandButtonStyle}" />
+                    <Button svc:Localized.AutomationNameKey="Common.Cancel" x:Name="CustomDueDateCancelButton" Click="CustomDueDateCancelButton_Click" FontSize="{Binding FilterTextSize}" Style="{StaticResource WidgetEditorCommandButtonStyle}" />
                 </StackPanel>
             </Grid>
         </Border>

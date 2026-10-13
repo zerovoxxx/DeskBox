@@ -222,6 +222,7 @@ public sealed partial class FileSurfaceContent :
         RegisterRenderWindowScrollTracking();
         Root.DataContext = ViewModel;
         Root.IsTabStop = true;
+        EmptyAddButtonText.Text = T("Widget.AddFile");
         InitializeEmptyStateHelp();
         OpenSelectionButton.Label = T("Common.Open");
         CopySelectionButton.Label = T("Common.Copy");
@@ -784,6 +785,11 @@ public sealed partial class FileSurfaceContent :
         await RunAsync(RefreshAsync);
     }
 
+    private async void AddButton_Click(object sender, RoutedEventArgs e)
+    {
+        await RunAsync(PickAndImportFilesAsync);
+    }
+
     private void EmptyStateHelpButton_Click(object sender, RoutedEventArgs e)
     {
         FlyoutBase.ShowAttachedFlyout(EmptyStateHelpButton);
@@ -808,7 +814,11 @@ public sealed partial class FileSurfaceContent :
 
     // Elevated widget windows cannot receive OLE drops from Explorer (UIPI),
     // so the empty state calls that case out instead of letting the drop fail
-    // silently (#458 follow-up).
+    // silently (#458 follow-up). The elevation check deliberately routes
+    // through DragDropPermissionService: an Owner-vs-User comparison (used
+    // here originally) is true for every admin-account user even on a
+    // standard filtered token — the Administrators SID stays the token's
+    // default owner — which disabled dragging on non-elevated instances.
     private static bool IsCurrentProcessElevatedCached()
     {
         if (s_isProcessElevated is { } cached)
@@ -816,8 +826,7 @@ public sealed partial class FileSurfaceContent :
             return cached;
         }
 
-        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-        s_isProcessElevated = identity.Owner != identity.User;
+        s_isProcessElevated = DragDropPermissionService.IsCurrentProcessElevated();
         return s_isProcessElevated.Value;
     }
 
@@ -1002,9 +1011,13 @@ public sealed partial class FileSurfaceContent :
             activeView.SelectedItems.Add(item);
         }
 
-        if (_settingsService.Settings.FileItemSystemContextMenuEnabled &&
-            item is not WidgetStackItem &&
-            GetSelectedItems().Count == 1)
+        bool nativeMenuEnabled =
+            _settingsService.Settings.FileItemSystemContextMenuEnabled;
+        bool isStackTile = item is WidgetStackItem;
+        int selectionCount = GetSelectedItems().Count;
+        if (nativeMenuEnabled &&
+            !isStackTile &&
+            selectionCount == 1)
         {
             // The native Shell menu only supports a single item, and stack
             // tiles have no file-system path; both keep the built-in flyout.
@@ -1249,8 +1262,10 @@ public sealed partial class FileSurfaceContent :
         _activeDragHasStorageItems = result.HasStorageItems;
         // Windows 10 collapses the advertised set to a single effect —
         // Explorer there prompts for every multi-effect drop regardless of
-        // the preferred operation. Windows 11 keeps Copy|Move plus the
-        // preference below.
+        // the preferred operation. The default (FollowWindows) resolves to
+        // Copy so IM-style receivers can never resolve the drop to Move
+        // and delete the original (feedback 500); Windows 11 keeps Copy|Move
+        // plus the preference below.
         e.AllowedOperations = FileItemDragPackage.ResolveDragOutAllowedOperations(
             _settingsService.Settings.FileWidget.ManagedDragOutAction);
         _activeDragAllowedOperations = e.AllowedOperations;
@@ -1329,6 +1344,10 @@ public sealed partial class FileSurfaceContent :
         bool hasStorageItems = _activeDragHasStorageItems;
         bool handledAsStackMembership =
             _activeDragHandledAsStackMembership;
+        // Captured before the resets below: the drag-out result hint runs
+        // after the session fields are cleared and still needs the set this
+        // gesture advertised to decide whether modifiers could flip it.
+        DataPackageOperation allowedOperations = _activeDragAllowedOperations;
         string? dragSessionId = _activeDragSessionId;
         bool releaseRecoveryPending = _sourceDragSession.ReleaseRecoveryPending;
         _sourceDragSession.Complete(dragSessionId);
@@ -1420,6 +1439,7 @@ public sealed partial class FileSurfaceContent :
 
             MaybeShowDragOutResultHint(
                 dropResult,
+                allowedOperations,
                 observation,
                 handledAsStackMembership);
         }
@@ -2563,19 +2583,25 @@ public sealed partial class FileSurfaceContent :
             return;
         }
 
+        // The tip outlives a quick drag (dismiss requests hold a five-second
+        // window), so the X is reachable with the mouse free after the drop.
         ShowFeedback(new WidgetFeedbackRequest(
             T("Widget.DragOutTip.Modifiers"),
             WidgetFeedbackSeverity.Info,
-            "drag-out-modifier-tip"));
+            "drag-out-modifier-tip",
+            DismissAction: DisableDragOutModifierTipAsync));
     }
 
     // Receipt after an unambiguous external drop (a reported Copy or Move —
     // None covers optimized moves and cancels alike): explains what just
     // happened and names the modifier that would have flipped it. A drag
     // advertised with a single effect (Windows 10) could not be flipped, so
-    // the receipt stays a plain statement there.
+    // the receipt stays a plain statement there. The advertised set arrives
+    // as a parameter captured before the session fields were reset — reading
+    // them here would always see None.
     private void MaybeShowDragOutResultHint(
         DataPackageOperation dropResult,
+        DataPackageOperation allowedOperations,
         ExternalDragObservation observation,
         bool handledAsStackMembership)
     {
@@ -2586,10 +2612,75 @@ public sealed partial class FileSurfaceContent :
             return;
         }
 
-        bool modifiersCouldFlip = _activeDragAllowedOperations
-            .HasFlag(DataPackageOperation.Copy) &&
-            _activeDragAllowedOperations.HasFlag(DataPackageOperation.Move);
-        string? key = dropResult switch
+        string? key = GetDragOutResultHintKey(dropResult, allowedOperations);
+        if (key is null)
+        {
+            return;
+        }
+
+        // Closing the receipt means the user does not want it: switch the
+        // setting off and persist through the normal save path so the settings
+        // window's toggle follows on the next SettingsChanged broadcast.
+        ShowFeedback(new WidgetFeedbackRequest(
+            T(key),
+            WidgetFeedbackSeverity.Info,
+            "drag-out-result-tip",
+            DismissAction: DisableDragOutResultHintAsync));
+    }
+
+    private Task DisableDragOutResultHintAsync()
+    {
+        return DisableDragTipSettingAsync(() =>
+            _settingsService.Settings.FileWidget.DragOutResultHintEnabled = false);
+    }
+
+    private Task DisableDragOutModifierTipAsync()
+    {
+        return DisableDragTipSettingAsync(() =>
+            _settingsService.Settings.FileWidget.DragOutModifierTipEnabled = false);
+    }
+
+    // Both dismiss paths persist through the normal save channel so the
+    // SettingsChanged broadcast re-projects an open settings window's
+    // toggles; the write must land on the UI thread either way.
+    private Task DisableDragTipSettingAsync(Action persist)
+    {
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            persist();
+            _settingsService.SaveDebounced();
+            return Task.CompletedTask;
+        }
+
+        var completion = new TaskCompletionSource();
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                persist();
+                _settingsService.SaveDebounced();
+            }
+            finally
+            {
+                completion.SetResult();
+            }
+        });
+        return completion.Task;
+    }
+
+    // Pure key choice for the receipt above, extracted for unit tests: only
+    // a Copy+Move advertisement can be flipped with Shift/Ctrl, and only a
+    // reported Copy or Move says anything definitive — None is an optimized
+    // move or a cancel, and Link is not an outcome this surface's drag-out
+    // produces.
+    internal static string? GetDragOutResultHintKey(
+        DataPackageOperation dropResult,
+        DataPackageOperation allowedOperations)
+    {
+        bool modifiersCouldFlip =
+            allowedOperations.HasFlag(DataPackageOperation.Copy) &&
+            allowedOperations.HasFlag(DataPackageOperation.Move);
+        return dropResult switch
         {
             DataPackageOperation.Copy => modifiersCouldFlip
                 ? "Widget.DragOutTip.AfterCopy"
@@ -2599,15 +2690,6 @@ public sealed partial class FileSurfaceContent :
                 : "Widget.DragOutTip.AfterMove.NoModifiers",
             _ => null
         };
-        if (key is null)
-        {
-            return;
-        }
-
-        ShowFeedback(new WidgetFeedbackRequest(
-            T(key),
-            WidgetFeedbackSeverity.Info,
-            "drag-out-result-tip"));
     }
 
     private void ShowSameDirectoryDropFeedback()
@@ -2882,19 +2964,28 @@ public sealed partial class FileSurfaceContent :
                 // toast here would replace that explanation.
                 if (_lastImportSkippedUndisplayableCount == 0)
                 {
-                    ShowFeedback(moveWhenMapped == true && completedCount == 0
-                        ? new(
+                    if (moveWhenMapped == true && completedCount == 0)
+                    {
+                        ShowFeedback(new(
                             T("Widget.NoItemsMoved"),
                             WidgetFeedbackSeverity.Warning,
-                            "file-drop-empty")
-                        : new(
+                            "file-drop-empty"));
+                    }
+                    else if (
+                        _settingsService.Settings.FileWidget.DragOutResultHintEnabled)
+                    {
+                        // The count receipt is the drop-in half of the result
+                        // hint setting: closing it switches the setting off.
+                        ShowFeedback(new(
                             _localizationService.Format(
                                 moveWhenMapped == true
                                     ? "Widget.MovedCount"
                                     : "Widget.PastedCount",
                                 completedCount),
                             WidgetFeedbackSeverity.Success,
-                            "file-drop"));
+                            "file-drop",
+                            DismissAction: DisableDragOutResultHintAsync));
+                    }
                 }
             }
         }
@@ -2917,7 +3008,7 @@ public sealed partial class FileSurfaceContent :
                 $"[DropOperation] operation={dropOperationId} widget={WidgetId} " +
                 $"stage=Failed error={ex}");
             ShowFeedback(new(
-                T("Widget.ImportFailed"),
+                DescribeImportFailure(ex, requestedCount: 0),
                 WidgetFeedbackSeverity.Error,
                 "file-drop-error"));
             if (_activeImportCancellation is not null)
@@ -3892,6 +3983,30 @@ public sealed partial class FileSurfaceContent :
             await CompleteTrackedImportAsync(ImportCompletionState.Canceled);
             throw;
         }
+        catch (FileService.FileTransferPartialFailureException ex) when (
+            ex.InnerException is FileService.FileTransferSourceCleanupException)
+        {
+            // The copy itself completed and the destination is intact; only
+            // the source deletion was blocked (typically a file still held
+            // open by another app). The view model already applied the
+            // receipts and the organizer recorded an undoable history entry,
+            // so report a completed import with a warning instead of a
+            // failure — the failure card reads as "nothing was imported"
+            // and drives duplicate retries (feedback 316). Sources that
+            // still physically exist stay out of the moved-out list so the
+            // source widget keeps showing them.
+            await CompleteTrackedImportAsync(ImportCompletionState.Completed);
+            ShowFeedback(new(
+                _localizationService.T("Widget.Import.SourceCleanupPending"),
+                WidgetFeedbackSeverity.Warning,
+                "file-import-source-cleanup-pending"));
+            movedSourcePaths.AddRange(ex.CompletedResults
+                .Where(result =>
+                    !File.Exists(result.SourcePath) &&
+                    !Directory.Exists(result.SourcePath))
+                .Select(result => result.SourcePath));
+            return movedSourcePaths;
+        }
         catch
         {
             await CompleteTrackedImportAsync(ImportCompletionState.Failed);
@@ -4127,8 +4242,12 @@ public sealed partial class FileSurfaceContent :
             App.Log(
                 $"[Import] Native import completed id={importId} widget={WidgetId} " +
                 $"count={droppedFiles.Length} elapsedMs={stopwatch.ElapsedMilliseconds}");
-            if (_lastImportSkippedUndisplayableCount == 0)
+            if (_lastImportSkippedUndisplayableCount == 0 &&
+                _settingsService.Settings.FileWidget.DragOutResultHintEnabled)
             {
+                // Same receipt contract as the WinUI drop path above: the
+                // count toast belongs to the result-hint setting and carries
+                // its dismiss affordance.
                 ShowFeedback(new(
                     _localizationService.Format(
                         moveWhenMapped == true
@@ -4136,7 +4255,8 @@ public sealed partial class FileSurfaceContent :
                             : "Widget.PastedCount",
                         droppedFiles.Length),
                     WidgetFeedbackSeverity.Success,
-                    "native-file-drop"));
+                    "native-file-drop",
+                    DismissAction: DisableDragOutResultHintAsync));
             }
 
             // When entries were refused as undisplayable, the skip feedback
@@ -4157,7 +4277,10 @@ public sealed partial class FileSurfaceContent :
                 $"[WidgetSurface] Native file drop failed id={WidgetId} " +
                 $"import={importId} elapsedMs={stopwatch.ElapsedMilliseconds}: {ex}");
             ShowFeedback(new(
-                DescribeImportFailure(ex, droppedFiles.Length),
+                DescribeImportFailure(
+                    ex,
+                    droppedFiles.Length,
+                    droppedFiles.Length == 1 ? droppedFiles[0].Path : null),
                 WidgetFeedbackSeverity.Error,
                 "native-file-drop-error"));
             return false;
@@ -4173,20 +4296,36 @@ public sealed partial class FileSurfaceContent :
     /// <summary>
     /// Localized import-failure feedback. Transfer-exception messages are
     /// English diagnostics aimed at the log and must not reach the toast;
-    /// partial results instead surface the counts the user can act on.
+    /// partial results instead surface the counts the user can act on, and
+    /// drop-preparation failures surface their dedicated causes.
     /// </summary>
     private string DescribeImportFailure(
         Exception exception,
-        int requestedCount) =>
-        exception is FileService.IFileTransferWithCompletedResults
+        int requestedCount,
+        string? singleItemPath = null)
+    {
+        if (ImportFailureMessagePolicy.SelectOverride(
+                exception,
+                requestedCount,
+                singleItemPath) is { } overrideSelection)
+        {
+            return overrideSelection.Args.Length == 0
+                ? _localizationService.T(overrideSelection.Key)
+                : _localizationService.Format(
+                    overrideSelection.Key,
+                    overrideSelection.Args);
+        }
+
+        return exception is FileService.IFileTransferWithCompletedResults
             {
                 CompletedResults: { } completed
-            }
+            } && requestedCount > 0
             ? _localizationService.Format(
                 "Widget.ImportPartialFailure",
                 completed.Count,
                 requestedCount)
             : _localizationService.T("Widget.ImportFailed");
+    }
 
     private void HandleSurfaceRealTimeReorder(
         DragPayloadSnapshot payload,
@@ -5238,8 +5377,43 @@ public sealed partial class FileSurfaceContent :
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
+
+        // Namespace objects (This PC, Recycle Bin, Control Panel, user shell
+        // folders) never expose CF_HDROP or storage items; Explorer's copy of
+        // them is a CFSTR_SHELLIDLIST payload. Real paths among them import
+        // normally; purely virtual items land as shortcuts, matching both
+        // Explorer's paste behavior and DeskBox's drag-to-grid behavior.
+        int createdNamespaceShortcuts = 0;
+        if (sourcePaths.Length == 0 &&
+            ShellClipboardHelper.TryGetShellIdListItems(
+                out IReadOnlyList<ShellClipboardHelper.ShellNamespaceClipboardItem> namespaceItems))
+        {
+            sourcePaths = namespaceItems
+                .Where(item => !string.IsNullOrWhiteSpace(item.FileSystemPath))
+                .Select(item => item.FileSystemPath)
+                .Where(path => File.Exists(path) || Directory.Exists(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            createdNamespaceShortcuts = await CreateShortcutsForPastedNamespaceItemsAsync(
+                namespaceItems
+                    .Where(item => string.IsNullOrWhiteSpace(item.FileSystemPath))
+                    .ToArray());
+        }
+
         if (sourcePaths.Length == 0)
         {
+            if (createdNamespaceShortcuts > 0)
+            {
+                _cutClipboardPaths = [];
+                ApplyCutState();
+                ShowFeedback(new WidgetFeedbackRequest(
+                    _localizationService.Format(
+                        "Widget.PastedCount",
+                        createdNamespaceShortcuts),
+                    WidgetFeedbackSeverity.Success,
+                    "file-paste"));
+            }
+
             return;
         }
 
@@ -5263,7 +5437,7 @@ public sealed partial class FileSurfaceContent :
         ShowFeedback(new WidgetFeedbackRequest(
             _localizationService.Format(
                 move ? "Widget.MovedCount" : "Widget.PastedCount",
-                sourcePaths.Length),
+                sourcePaths.Length + createdNamespaceShortcuts),
             WidgetFeedbackSeverity.Success,
             move ? "file-move" : "file-paste"));
     }
@@ -5282,7 +5456,8 @@ public sealed partial class FileSurfaceContent :
 
     private bool CanPasteFromClipboard()
     {
-        if (ShellClipboardHelper.HasFileDropList())
+        if (ShellClipboardHelper.HasFileDropList() ||
+            ShellClipboardHelper.HasShellIdList())
         {
             return true;
         }
@@ -5381,6 +5556,8 @@ public sealed partial class FileSurfaceContent :
         UpdateItemSurfaceVisuals();
     }
 
+    public Task AddFromTitleButtonAsync() => RunAsync(PickAndImportFilesAsync);
+
     private async Task PickAndImportFilesAsync()
     {
         _ = await PickAndImportFilesAsync(suggestedFolder: null);
@@ -5463,6 +5640,16 @@ public sealed partial class FileSurfaceContent :
         catch (OperationCanceledException)
         {
             App.Log($"[WidgetSurface] File action canceled id={WidgetId}");
+        }
+        catch (Exception ex) when (
+            ex is OrganizerService.MappedFolderUnavailableException or
+               OrganizerService.DestinationOutsideMappedRootException)
+        {
+            App.Log($"[WidgetSurface] File action failed id={WidgetId}: {ex}");
+            ShowFeedback(new(
+                DescribeImportFailure(ex, requestedCount: 0),
+                WidgetFeedbackSeverity.Error,
+                "file-action-error"));
         }
         catch (Exception ex)
         {

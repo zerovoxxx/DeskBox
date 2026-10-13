@@ -292,6 +292,9 @@ public class AppSettings
     /// <inheritdoc cref="MusicSettingsSlice.MusicDisplayMode"/>
     public string MusicDisplayMode { get => Music.MusicDisplayMode; set => Music.MusicDisplayMode = value; }
 
+    /// <inheritdoc cref="MusicSettingsSlice.MusicHideTimelineWhenUnavailable"/>
+    public bool MusicHideTimelineWhenUnavailable { get => Music.MusicHideTimelineWhenUnavailable; set => Music.MusicHideTimelineWhenUnavailable = value; }
+
     /// <inheritdoc cref="QuickCaptureSettingsSlice.LastQuickCaptureFileWidgetId"/>
     public string LastQuickCaptureFileWidgetId { get => QuickCapture.LastQuickCaptureFileWidgetId; set => QuickCapture.LastQuickCaptureFileWidgetId = value; }
 
@@ -348,6 +351,29 @@ public class AppSettings
 
     /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetBorderStyle"/>
     public string WidgetBorderStyle { get => WidgetShell.WidgetBorderStyle; set => WidgetShell.WidgetBorderStyle = value; }
+
+    /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetBackgroundMode"/>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WidgetBackgroundMode { get => WidgetShell.WidgetBackgroundMode; set => WidgetShell.WidgetBackgroundMode = value; }
+
+    /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetBackgroundUnifiedImage"/>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WidgetBackgroundUnifiedImage { get => WidgetShell.WidgetBackgroundUnifiedImage; set => WidgetShell.WidgetBackgroundUnifiedImage = value; }
+
+    /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetBackgroundPanoramaImage"/>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WidgetBackgroundPanoramaImage { get => WidgetShell.WidgetBackgroundPanoramaImage; set => WidgetShell.WidgetBackgroundPanoramaImage = value; }
+
+    /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetBackgroundDim"/>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? WidgetBackgroundDim { get => WidgetShell.WidgetBackgroundDim; set => WidgetShell.WidgetBackgroundDim = value; }
+
+    /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetBackgroundUnifiedFit"/>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WidgetBackgroundUnifiedFit { get => WidgetShell.WidgetBackgroundUnifiedFit; set => WidgetShell.WidgetBackgroundUnifiedFit = value; }
+
+    /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetTextShadowEnabled"/>
+    public bool WidgetTextShadowEnabled { get => WidgetShell.WidgetTextShadowEnabled; set => WidgetShell.WidgetTextShadowEnabled = value; }
 
     /// <inheritdoc cref="WidgetShellSettingsSlice.WidgetCornerPreference"/>
     public string WidgetCornerPreference { get => WidgetShell.WidgetCornerPreference; set => WidgetShell.WidgetCornerPreference = value; }
@@ -585,6 +611,27 @@ public class AppSettings
     /// <inheritdoc cref="WidgetLayoutSettingsSlice.Widgets"/>
     public List<WidgetConfig> Widgets { get => WidgetLayout.Widgets; set => WidgetLayout.Widgets = value; }
 
+    /// <inheritdoc cref="WidgetLayoutSettingsSlice.WidgetDefaultBoundScreenId"/>
+    public string? WidgetDefaultBoundScreenId
+    {
+        get => WidgetLayout.WidgetDefaultBoundScreenId;
+        set => WidgetLayout.WidgetDefaultBoundScreenId = value;
+    }
+
+    /// <inheritdoc cref="WidgetLayoutSettingsSlice.WidgetNewPlacementTarget"/>
+    public string WidgetNewPlacementTarget
+    {
+        get => WidgetLayout.WidgetNewPlacementTarget;
+        set => WidgetLayout.WidgetNewPlacementTarget = value;
+    }
+
+    /// <inheritdoc cref="WidgetLayoutSettingsSlice.WidgetDisplayDisconnectBehavior"/>
+    public string WidgetDisplayDisconnectBehavior
+    {
+        get => WidgetLayout.WidgetDisplayDisconnectBehavior;
+        set => WidgetLayout.WidgetDisplayDisconnectBehavior = value;
+    }
+
     /// <inheritdoc cref="WidgetLayoutSettingsSlice.WidgetGroups"/>
     public List<WidgetGroupConfig> WidgetGroups { get => WidgetLayout.WidgetGroups; set => WidgetLayout.WidgetGroups = value; }
 
@@ -608,6 +655,9 @@ public class AppSettings
 
     /// <inheritdoc cref="WidgetLayoutSettingsSlice.WidgetGroupHoverSwitchEnabled"/>
     public bool WidgetGroupHoverSwitchEnabled { get => WidgetLayout.WidgetGroupHoverSwitchEnabled; set => WidgetLayout.WidgetGroupHoverSwitchEnabled = value; }
+
+    /// <inheritdoc cref="WidgetLayoutSettingsSlice.WidgetGroupSwitchAnimationStyle"/>
+    public string WidgetGroupSwitchAnimationStyle { get => WidgetLayout.WidgetGroupSwitchAnimationStyle; set => WidgetLayout.WidgetGroupSwitchAnimationStyle = value; }
 
     /// <inheritdoc cref="WidgetShellSettingsSlice.FocusClickedWidgetOnRaise"/>
     public bool FocusClickedWidgetOnRaise { get => WidgetShell.FocusClickedWidgetOnRaise; set => WidgetShell.FocusClickedWidgetOnRaise = value; }
@@ -642,6 +692,9 @@ public class AppSettings
 
     /// <inheritdoc cref="WeatherSettingsSlice.WeatherSkin"/>
     public string WeatherSkin { get => Weather.WeatherSkin; set => Weather.WeatherSkin = value; }
+
+    /// <inheritdoc cref="WeatherSettingsSlice.WeatherIconStyle"/>
+    public string WeatherIconStyle { get => Weather.WeatherIconStyle; set => Weather.WeatherIconStyle = value; }
 
     /// <inheritdoc cref="WeatherSettingsSlice.WeatherShowForecast"/>
     public bool WeatherShowForecast { get => Weather.WeatherShowForecast; set => Weather.WeatherShowForecast = value; }

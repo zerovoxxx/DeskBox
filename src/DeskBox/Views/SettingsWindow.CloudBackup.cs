@@ -49,23 +49,32 @@ public sealed partial class SettingsWindow
     private async void CloudBackupSavePasswordButton_Click(object sender, RoutedEventArgs e)
     {
         if (!_backupSettingsViewModel.ActionsEnabled) return;
-        string password = CloudBackupPasswordBox.Password;
-        if (string.IsNullOrWhiteSpace(password))
+        // The buttons live inside the deferred section, so a click implies the
+        // section exists; the null guard only covers teardown races (window
+        // closing mid-click) and must stay observable — a silent no-op here
+        // would hide a broken typed lookup (P1-1's failure shape).
+        if (CloudBackupPasswordBox is not { } passwordBox)
         {
-            await ShowInfoDialogAsync(
-                _localizationService.T("Settings.CloudBackup.Password.EmptyTitle"),
-                _localizationService.T("Settings.CloudBackup.Password.EmptyBody"));
+            App.Log("[CloudBackup] Save password skipped: the password box is not available.");
             return;
         }
-
+        string password = passwordBox.Password;
+        // Empty input is rejected inline by the view model through the
+        // connection-status message line (PasswordEmpty) — no modal dialog.
         if (await _backupSettingsViewModel.SaveCredentialAsync(password))
-            CloudBackupPasswordBox.Password = string.Empty;
+            passwordBox.Password = string.Empty;
     }
 
     private async void CloudBackupTestConnectionButton_Click(object sender, RoutedEventArgs e)
     {
         if (!_backupSettingsViewModel.ActionsEnabled) return;
-        string typedPassword = CloudBackupPasswordBox.Password;
+        // Same teardown-race guard as the save handler — log, never crash.
+        if (CloudBackupPasswordBox is not { } passwordBox)
+        {
+            App.Log("[CloudBackup] Test connection skipped: the password box is not available.");
+            return;
+        }
+        string typedPassword = passwordBox.Password;
         await _backupSettingsViewModel.ProbeAsync(
             string.IsNullOrEmpty(typedPassword) ? null : typedPassword);
     }

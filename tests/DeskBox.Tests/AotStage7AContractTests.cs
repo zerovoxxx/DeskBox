@@ -155,6 +155,7 @@ public sealed class AotStage7AContractTests
         var startInfo = new ProcessStartInfo
         {
             FileName = dotnet,
+            WorkingDirectory = TestPaths.DotnetWorkingDirectory,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,

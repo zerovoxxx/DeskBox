@@ -193,6 +193,9 @@ public sealed partial class FeatureWidgetsSettingsViewModel : ObservableObject
     public bool SetMusicEnableCoverHoverMotion(bool value) =>
         _settings.SetMusicEnableCoverHoverMotion(value);
 
+    public bool SetMusicHideTimelineWhenUnavailable(bool value) =>
+        _settings.SetMusicHideTimelineWhenUnavailable(value);
+
     public void ResetMusicPresentationPreferences(bool scheduleSave = true) =>
         _settings.ResetMusicPresentationPreferences(scheduleSave);
 
@@ -207,6 +210,9 @@ public sealed partial class FeatureWidgetsSettingsViewModel : ObservableObject
 
     public bool SetWeatherSkin(string? skin) =>
         _settings.SetWeatherSkin(skin);
+
+    public bool SetWeatherIconStyle(string? style) =>
+        _settings.SetWeatherIconStyle(style);
 
     public bool SetWeatherDataSource(string? source) =>
         _settings.SetWeatherDataSource(source);

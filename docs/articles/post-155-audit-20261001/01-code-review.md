@@ -12,16 +12,16 @@
 
 ### P1（用户大概率触发的功能缺陷）
 
-**P1-1 云备份密码框 getter 在 AOT 下抛 InvalidCastException（已知遗留，未修）**
-- `src/DeskBox/Views/SettingsWindow.SectionElements.cs:204-205`：`CloudBackupPasswordBox` getter 用 `FindCreatedSectionElement<PasswordBox>(...)!` 强制非空；消费点 `SettingsWindow.CloudBackup.cs:52/62/68` 直接解引用 `.Password`，无判空、无 try/catch。
-- 真机证据：`docs/articles/win10-drag-out-incident-20260930.md` §4（诊断包日志：点"测试连接"必现、点"保存密码"三次 unhandled，进程存活）。
-- 非本批引入（1.5.5 前即存在），交接文档明确"另开一条修"，当前工作区无护栏。置信度：中（真机日志确凿、静态无法完全复现）。
+**P1-1 云备份密码框 getter 在 AOT 下抛 InvalidCastException — ✅ 2026-10-01 已修（终局证明待 AOT 零售包）**
+- 原 symptom：`SettingsWindow.SectionElements.cs` 的 `CloudBackupPasswordBox` getter 强制非空 + 消费点直接解引用，AOT 零售包上点"测试连接/保存密码"必炸（真机日志实锤）。
+- **根因（10-01 定案）**：PasswordBox 是全应用唯一零 IL 引用的延迟节控件（无 x:Bind/handler/从未 new）→ NativeAOT 裁掉其投影类型反射根 → CsWinRT 按运行时类名解析时走 trim fallback 把 RCW 包装成基类并按 COM 身份缓存 → `is T` 与强转永远失败。JIT 靠完整反射不发病；**09-22 的 FromAbi 重包装修法被证实结构性无效**（换不回身份缓存的错型 RCW）。
+- 修法：`[DynamicDependency(All, typeof(PasswordBox))]` 显式保根 + getter 可空 + 两处消费守卫（App.Log 可见）+ AotDeepSmoke 路由后断言 + 4 条结构契约测试。
 
 ### P2（边界/潜伏）
 
-**P2-1 拖出结果提示恒用"无修饰键"文案（本批新引入，机械可修）** ★已二次复核实锤
-- `src/DeskBox/Controls/WidgetContents/FileSurfaceContent.xaml.cs:1342` 在 `CompleteDragItemsSession` 内先把 `_activeDragAllowedOperations = None` 复位，`:1421` 才调 `MaybeShowDragOutResultHint`，后者 `:2589-2591` 读该字段算 `modifiersCouldFlip` → 恒 false → Win11（Copy|Move）上"按 Ctrl 可复制"教学变体永不出现。
-- 修复方向：复位前把允许集捕获为局部变量传入。
+**P2-1 拖出结果提示恒用"无修饰键"文案 — ✅ 2026-10-01 已修**
+- 原缺陷：`FileSurfaceContent.xaml.cs` 在 `CompleteDragItemsSession` 内先把 `_activeDragAllowedOperations = None` 复位，之后才调 `MaybeShowDragOutResultHint`（读该字段算 `modifiersCouldFlip`）→ 恒 false → Win11 上"按 Ctrl 可复制"教学变体永不出现。
+- 修法：复位前捕获允许集传参 + 提取 `GetDragOutResultHintKey` 纯函数 + 13 例矩阵与 Win10 组合测试（Win10 单比特行为不变有钉）。
 
 **P2-2 `WritePerformedDropEffect` HGLOBAL 分配方式与全库约定不一致**
 - `src/DeskBox/Helpers/NativeDropTarget.cs:600` 用 `AllocHGlobal`（LMEM_FIXED）构造 medium；库内其它 HGLOBAL 生产点（`Win32Helper.cs:688-713`）用 `GlobalAlloc(GMEM_MOVEABLE)`。现代 Windows 两堆合一大概率无害，潜伏 ABI 摩擦，记录备查。置信度：低-中。

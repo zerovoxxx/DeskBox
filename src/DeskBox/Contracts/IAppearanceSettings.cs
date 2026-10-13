@@ -51,6 +51,50 @@ public static class WidgetCornerKinds
         preference is Square or Small ? preference : Round;
 }
 
+/// <summary>Canonical widget background modes (global, appearance-level).</summary>
+public static class WidgetBackgroundModeKinds
+{
+    /// <summary>Widgets follow the global window material (default).</summary>
+    public const string Material = "Material";
+
+    /// <summary>Every widget shows the same unified background image.</summary>
+    public const string UnifiedImage = "UnifiedImage";
+
+    /// <summary>
+    /// One panorama image spans the desktop coordinate space; every widget
+    /// samples the slice under its own screen position.
+    /// </summary>
+    public const string Panorama = "Panorama";
+
+    public static string Normalize(string? mode) =>
+        string.Equals(mode, UnifiedImage, StringComparison.OrdinalIgnoreCase)
+            ? UnifiedImage
+            : string.Equals(mode, Panorama, StringComparison.OrdinalIgnoreCase)
+                ? Panorama
+                : Material;
+}
+
+/// <summary>
+/// Canonical background image fit and dim values shared by the appearance
+/// editor and the per-widget customization services.
+/// </summary>
+public static class WidgetBackgroundKinds
+{
+    public const string FitFill = "Fill";
+    public const string FitContain = "Contain";
+
+    /// <summary>Default scrim strength in percent, applied over the image.</summary>
+    public const double DefaultDimPercent = 35;
+
+    public const double MinDimPercent = 0;
+    public const double MaxDimPercent = 100;
+
+    public static string NormalizeFit(string? value) =>
+        string.Equals(value, FitContain, StringComparison.OrdinalIgnoreCase)
+            ? FitContain
+            : FitFill;
+}
+
 /// <summary>Canonical widget title icon modes.</summary>
 public static class WidgetTitleIconKinds
 {
@@ -355,6 +399,13 @@ public readonly record struct AppearanceForegroundSettings(
     string ForegroundMode,
     string ForegroundColor);
 
+public readonly record struct AppearanceWidgetBackgroundSettings(
+    string Mode,
+    string? UnifiedImageFileName,
+    string? PanoramaImageFileName,
+    double DimPercent,
+    string UnifiedFit);
+
 /// <summary>
 /// Settings-page writes for the appearance section: material, density,
 /// typography, default widget size, window chrome, animation, foreground and
@@ -412,4 +463,15 @@ public interface IAppearanceSettings
 
     void SetWidgetForegroundMode(string? mode);
     void SetWidgetForegroundColor(string colorHex);
+
+    AppearanceWidgetBackgroundSettings ReadWidgetBackground();
+    void SetWidgetBackgroundMode(string? mode);
+    void SetWidgetBackgroundUnifiedImage(string? fileName);
+    void SetWidgetBackgroundPanoramaImage(string? fileName);
+    void SetWidgetBackgroundUnifiedFit(string? fit);
+    AppearanceValueUpdate UpdateWidgetBackgroundDim(double percent);
+    int ClearPerWidgetBackgrounds();
+
+    bool ReadWidgetTextShadowEnabled();
+    void SetWidgetTextShadowEnabled(bool enabled);
 }

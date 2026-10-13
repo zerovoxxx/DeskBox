@@ -15,10 +15,9 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
+using Microsoft.Windows.Storage.Pickers;
 using Windows.Storage;
-using Windows.Storage.Pickers;
 using Windows.UI;
-using WinRT.Interop;
 
 namespace DeskBox.Controls.WidgetContents;
 
@@ -877,32 +876,6 @@ public sealed partial class QuickCaptureSurfaceContent :
     private async void AddButton_Click(object sender, RoutedEventArgs e)
     {
         await RunAsync(AddInputWithFeedbackAsync);
-        InputTextBox.Focus(FocusState.Programmatic);
-    }
-
-    private async void InputTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
-    {
-        bool controlPressed = Win32Helper.IsKeyPressed(
-            Windows.System.VirtualKey.Control);
-        bool saveShortcut = TextBoxEditorShortcutHelper.IsCtrlSaveShortcut(
-            e.Key,
-            controlPressed,
-            Win32Helper.IsKeyPressed(Windows.System.VirtualKey.Shift));
-        if (e.Key != Windows.System.VirtualKey.Enter && !saveShortcut)
-        {
-            return;
-        }
-
-        e.Handled = true;
-        if (saveShortcut || SettingsService.ShouldSubmitEditorOnEnter(
-                _settingsService.Settings.QuickCaptureEditorEnterBehavior,
-                controlPressed))
-        {
-            await RunAsync(AddInputWithFeedbackAsync);
-            return;
-        }
-
-        TextBoxEditorShortcutHelper.InsertLineBreak(InputTextBox);
     }
 
     private void SearchTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -1602,20 +1575,19 @@ public sealed partial class QuickCaptureSurfaceContent :
 
         try
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.Desktop
-            };
-            picker.FileTypeFilter.Add("*");
             IntPtr foreground = Win32Helper.GetForegroundWindow();
             IntPtr owner = Win32Helper.GetAncestor(foreground, Win32Helper.GA_ROOT);
-            InitializeWithWindow.Initialize(
-                picker,
-                owner == IntPtr.Zero ? foreground : owner);
-            IReadOnlyList<StorageFile> files = await picker.PickMultipleFilesAsync();
+            IReadOnlyList<string> files =
+                await FileOpenPickerService.PickMultipleFilesAsync(
+                    owner == IntPtr.Zero ? foreground : owner,
+                    [],
+                    PickerLocationId.Desktop);
             DroppedFilePath[] paths = files
-                .Where(file => !string.IsNullOrWhiteSpace(file.Path) && File.Exists(file.Path))
-                .Select(file => new DroppedFilePath(file.Path, file.Name, ForceManagedCopy: false))
+                .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                .Select(path => new DroppedFilePath(
+                    path,
+                    Path.GetFileName(path),
+                    ForceManagedCopy: false))
                 .ToArray();
             if (paths.Length == 0)
             {
@@ -2927,14 +2899,23 @@ public sealed partial class QuickCaptureSurfaceContent :
         DependencyObject? itemRoot,
         bool isVisible)
     {
-        if (itemRoot is null ||
-            FindQuickCaptureVisualChild<Border>(itemRoot, "QuickCaptureItemActionButtons") is not { } actionButtons)
+        if (itemRoot is null)
         {
             return;
         }
 
-        actionButtons.Opacity = isVisible ? 1 : 0;
-        actionButtons.IsHitTestVisible = isVisible;
+        if (FindQuickCaptureVisualChild<Border>(itemRoot, "QuickCaptureItemActionButtons") is { } actionButtons)
+        {
+            actionButtons.Opacity = isVisible ? 1 : 0;
+            actionButtons.IsHitTestVisible = isVisible;
+        }
+
+        // Same pass also toggles the hover wash so the card itself reacts,
+        // matching the Todo widget's dual hover feedback.
+        if (FindQuickCaptureVisualChild<Border>(itemRoot, "QuickCaptureItemHoverBackground") is { } hoverBackground)
+        {
+            hoverBackground.Opacity = isVisible ? 1 : 0;
+        }
     }
 
     private static T? FindQuickCaptureVisualChild<T>(DependencyObject parent, string name)
@@ -3168,10 +3149,6 @@ public sealed partial class QuickCaptureSurfaceContent :
         object? focused = XamlRoot is null
             ? null
             : FocusManager.GetFocusedElement(XamlRoot);
-        if (ReferenceEquals(focused, InputTextBox))
-        {
-            return "Input";
-        }
         if (ReferenceEquals(focused, SearchTextBox))
         {
             return "Search";
@@ -3190,7 +3167,6 @@ public sealed partial class QuickCaptureSurfaceContent :
         _pendingFocusTarget = null;
         FrameworkElement element = target switch
         {
-            "Input" => InputTextBox,
             "Search" => SearchTextBox,
             "Items" => ItemsList,
             _ => ResponsiveContentGrid

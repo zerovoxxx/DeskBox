@@ -319,6 +319,13 @@ public sealed class DesktopAutoOrganizationSuppressionRegistryTests : IDisposabl
 
         Assert.True(second.TryConsume(destination));
         Assert.False(second.TryConsume(destination));
+
+        // TryConsume queues another chained persist after the SpinWait above
+        // observed the first one; drain both registries or the in-flight
+        // temp-file write races this test's directory teardown (seen as an
+        // IOException on slower CI runners).
+        Assert.True(first.WaitForPendingPersistAsync().Wait(TimeSpan.FromSeconds(10)));
+        Assert.True(second.WaitForPendingPersistAsync().Wait(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -350,13 +357,33 @@ public sealed class DesktopAutoOrganizationSuppressionRegistryTests : IDisposabl
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         File.WriteAllText(destination, "arrived after expiry");
         Assert.False(second.TryConsume(destination));
+
+        Assert.True(first.WaitForPendingPersistAsync().Wait(TimeSpan.FromSeconds(10)));
+        Assert.True(second.WaitForPendingPersistAsync().Wait(TimeSpan.FromSeconds(10)));
     }
 
     public void Dispose()
     {
-        if (Directory.Exists(_root))
+        if (!Directory.Exists(_root))
         {
-            Directory.Delete(_root, recursive: true);
+            return;
+        }
+
+        // Pool-thread handle release can trail the drained persist task by a
+        // scheduling hiccup on loaded runners; a short bounded retry keeps
+        // teardown deterministic without hiding a stuck writer (a real stall
+        // still throws after the retries).
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                Directory.Delete(_root, recursive: true);
+                return;
+            }
+            catch (IOException) when (attempt < 3)
+            {
+                Thread.Sleep(200);
+            }
         }
     }
 }

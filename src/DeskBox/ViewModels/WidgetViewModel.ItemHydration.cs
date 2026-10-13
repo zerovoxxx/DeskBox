@@ -385,6 +385,38 @@ public partial class WidgetViewModel
         }
     }
 
+    /// <summary>
+    /// Nulls decoded icon references a hidden surface no longer displays.
+    /// RenderedItems members keep their icons so the next reveal paints the
+    /// visible page instantly; the cleared tail rehydrates through the
+    /// existing render-window growth triggers when it scrolls back into
+    /// view. Without this the item models pin every LRU-evicted bitmap for
+    /// their whole lifetime, so a large grid can hold tens of MB the icon
+    /// cache believes it released. Unrendered items are not in any
+    /// ItemsSource, so clearing them is visually inert at any moment —
+    /// including while parking a group member mid switch transition.
+    /// </summary>
+    internal int ReleaseUnrenderedItemIcons()
+    {
+        if (_isDisposed)
+        {
+            return 0;
+        }
+
+        var rendered = new HashSet<WidgetItem>(RenderedItems);
+        int released = 0;
+        foreach (var item in Items)
+        {
+            if (item.Icon is not null && !rendered.Contains(item))
+            {
+                item.Icon = null;
+                released++;
+            }
+        }
+
+        return released;
+    }
+
     private void RefreshAllIcons()
     {
         ClearCurrentItemIconCache();

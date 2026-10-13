@@ -13,7 +13,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public void ProductionInventory_IsFrozenAtThirtySevenFilesAndEightySevenCalls()
+    public void ProductionInventory_IsFrozenAtThirtyEightFilesAndNinetyCalls()
     {
         var expected = new Dictionary<string, int>(StringComparer.Ordinal)
         {
@@ -53,7 +53,10 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             ["src/DeskBox/Services/TodoWidgetStore.cs"] = 3,
             ["src/DeskBox/Services/WeatherService.cs"] = 5,
             ["src/DeskBox/Services/WidgetFileStackSettings.cs"] = 7,
-            ["src/DeskBox/Services/WidgetLayoutStore.cs"] = 2
+            ["src/DeskBox/Services/WidgetLayoutStore.cs"] = 2,
+            // 3: the title-icon asset store's recent-emoji state file
+            // (load deserialize, add deserialize, atomic save serialize).
+            ["src/DeskBox/Services/WidgetTitleIconAssetStore.cs"] = 3
         };
 
         Dictionary<string, int> actual = ProductionSourceFiles()
@@ -73,8 +76,8 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             Assert.Equal(expectedCount, actual[path]);
         }
 
-        Assert.Equal(37, actual.Count);
-        Assert.Equal(87, actual.Values.Sum());
+        Assert.Equal(38, actual.Count);
+        Assert.Equal(90, actual.Values.Sum());
 
         string[] expectedContextOwners =
         [
@@ -110,6 +113,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             "src/DeskBox/Services/WeatherService.cs",
             "src/DeskBox/Services/WidgetFileStackSettings.cs",
             "src/DeskBox/Services/WidgetLayoutStore.cs",
+            "src/DeskBox/Services/WidgetTitleIconAssetStore.cs",
             "src/DeskBox/Sync/SyncJsonContext.cs"
         ];
         string[] actualContextOwners = ProductionSourceFiles()
@@ -120,7 +124,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             .Order()
             .ToArray();
 
-        Assert.Equal(33, actualContextOwners.Length);
+        Assert.Equal(34, actualContextOwners.Length);
         Assert.Equal(expectedContextOwners, actualContextOwners);
     }
 
@@ -457,13 +461,14 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             backup.ReplaceLineEndings("\r\n"),
             StringComparison.Ordinal);
 
-        // Five call sites: classic prepare + scoped cloud prepare + the
+        // Six call sites: classic prepare + scoped cloud prepare + the
         // pre-restore safety backup pin + the confirm-dialog item-merge
-        // mode update + the scoped-restore attempt-count persistence
-        // (part of the bounded-retry abandon cap). All must still go
-        // through the same atomic-write helper.
+        // mode update + the full-restore confirmation update + the
+        // scoped-restore attempt-count persistence (part of the
+        // bounded-retry abandon cap). All must still go through the same
+        // atomic-write helper.
         Assert.Equal(
-            5,
+            6,
             Regex.Matches(
                 backup,
                 @"await\s+WritePendingRestoreMarkerAtomicallyAsync\s*\(").Cast<Match>().Count());

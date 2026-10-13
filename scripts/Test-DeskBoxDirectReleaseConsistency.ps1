@@ -34,13 +34,16 @@ $x64VersionInfo = Read-RequiredMatch $x64Installer '#define MyAppVersionInfo "([
 $arm64Version = Read-RequiredMatch $arm64Installer '#define MyAppVersion "([^"]+)"' 'ARM64 installer version'
 $arm64VersionInfo = Read-RequiredMatch $arm64Installer '#define MyAppVersionInfo "([^"]+)"' 'ARM64 installer file version'
 
+$numericVersion = [version]$projectVersion
+$expectedFileVersion = if ($numericVersion.Revision -ge 0) { $projectVersion } else { "$projectVersion.0" }
+
 $checks = @(
     @{ Name = 'x64 installer'; Actual = $x64Version; Expected = $projectVersion }
     @{ Name = 'ARM64 installer'; Actual = $arm64Version; Expected = $projectVersion }
-    @{ Name = 'project file version'; Actual = $projectVersionInfo; Expected = "$projectVersion.0" }
-    @{ Name = 'package version'; Actual = $packageVersionInfo; Expected = "$projectVersion.0" }
-    @{ Name = 'x64 installer file version'; Actual = $x64VersionInfo; Expected = "$projectVersion.0" }
-    @{ Name = 'ARM64 installer file version'; Actual = $arm64VersionInfo; Expected = "$projectVersion.0" }
+    @{ Name = 'project file version'; Actual = $projectVersionInfo; Expected = $expectedFileVersion }
+    @{ Name = 'package version'; Actual = $packageVersionInfo; Expected = $expectedFileVersion }
+    @{ Name = 'x64 installer file version'; Actual = $x64VersionInfo; Expected = $expectedFileVersion }
+    @{ Name = 'ARM64 installer file version'; Actual = $arm64VersionInfo; Expected = $expectedFileVersion }
 )
 
 if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion)) {

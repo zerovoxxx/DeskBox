@@ -48,6 +48,15 @@ public sealed partial class SettingsWindow
                 return;
             }
 
+            // The desktop organizer sweeps the desktop on every run; a
+            // storage root there would re-ingest its own managed folders,
+            // so the choice is rejected before any migration is offered.
+            if (ManagedStoragePathService.OverlapsDesktop(normalizedPath))
+            {
+                await ShowManagedStorageDesktopOverlapDialogAsync();
+                continue;
+            }
+
             if (App.Current.WidgetManager is not { } manager) return;
             var choice = await ManagedStorageMigrationDialog.ConfirmAsync(SettingsRoot.XamlRoot, _localizationService,
                 manager.GetDefaultManagedStorageWidgetCount(), ViewModel.ManagedStorageRootPath, normalizedPath,
@@ -78,6 +87,29 @@ public sealed partial class SettingsWindow
         }
     }
 
+    private async Task ShowManagedStorageDesktopOverlapDialogAsync()
+    {
+        if (SettingsRoot.XamlRoot is null)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = SettingsRoot.XamlRoot,
+            Title = _localizationService.T("Settings.ManagedPath.Error.DesktopOverlapTitle"),
+            CloseButtonText = _localizationService.T("Common.Close"),
+            DefaultButton = ContentDialogButton.Close,
+            Content = new TextBlock
+            {
+                Text = _localizationService.T("Settings.ManagedPath.Error.DesktopOverlapBody"),
+                TextWrapping = TextWrapping.Wrap
+            }
+        };
+
+        await dialog.ShowAsync();
+    }
+
     private void RefreshManagedStoragePathWarning()
     {
         if (ManagedStoragePathWarningText is null)
@@ -88,6 +120,10 @@ public sealed partial class SettingsWindow
         ManagedStoragePathAssessment assessment =
             ManagedStoragePathService.AssessPath(ViewModel.ManagedStorageRootPath);
         var warnings = new List<string>();
+        if (ManagedStoragePathService.OverlapsDesktop(ViewModel.ManagedStorageRootPath))
+        {
+            warnings.Add(_localizationService.T("Settings.ManagedPath.Warning.DesktopOverlap"));
+        }
         if (assessment.IsSystemDrive)
         {
             warnings.Add(_localizationService.T(assessment.HasSuitableNonSystemDrive
@@ -108,24 +144,27 @@ public sealed partial class SettingsWindow
         }
 
         ManagedStoragePathWarningText.Text = string.Join(Environment.NewLine, warnings);
-        ManagedStoragePathWarningBorder.Visibility = warnings.Count > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        ManagedStoragePathWarningBorder.IsOpen = warnings.Count > 0;
     }
 
     private void RefreshDragOutWin10State()
     {
         // Windows 10 cannot offer a modifier switch to external targets: a
         // brokered drag there advertises a single effect only. The modifier
-        // tip therefore never fires and its toggle is disabled; the note
-        // under the drag-out combo explains the collapsed semantics.
+        // tip therefore never fires and its toggle is disabled; the note is
+        // appended to the card description (the content column is an Auto
+        // grid column — a wide note there overflows the card on high-scale
+        // narrow windows instead of wrapping).
         bool modifiersReachExternalTargets =
             WindowsCompatibilityService.IsWindows11OrLater;
-        if (DragOutWin10Note is { } note)
+        if (DragOutActionCard is { } card)
         {
-            note.Visibility = modifiersReachExternalTargets
-                ? Visibility.Collapsed
-                : Visibility.Visible;
+            string description = _localizationService.T("Settings.DragOutAction.Description");
+            if (!modifiersReachExternalTargets)
+            {
+                description += "\n" + _localizationService.T("Settings.DragOutAction.Win10Note");
+            }
+            card.Description = description;
         }
         if (DragOutModifierTipToggle is { } toggle)
         {
@@ -249,7 +288,7 @@ public sealed partial class SettingsWindow
                 Title = shouldUnpin
                     ? _localizationService.T("Settings.Dialog.UnpinQuickAccessFailedTitle")
                     : _localizationService.T("Settings.Dialog.PinQuickAccessFailedTitle"),
-                CloseButtonText = _localizationService.T("Common.Ok"),
+                CloseButtonText = _localizationService.T("Common.Close"),
                 DefaultButton = ContentDialogButton.Close,
                 Content = new TextBlock
                 {
@@ -271,7 +310,7 @@ public sealed partial class SettingsWindow
                     Title = shouldUnpin
                         ? _localizationService.T("Settings.Dialog.UnpinQuickAccessFailedTitle")
                         : _localizationService.T("Settings.Dialog.PinQuickAccessFailedTitle"),
-                    CloseButtonText = _localizationService.T("Common.Ok"),
+                    CloseButtonText = _localizationService.T("Common.Close"),
                     DefaultButton = ContentDialogButton.Close,
                     Content = new TextBlock
                     {
@@ -381,28 +420,10 @@ public sealed partial class SettingsWindow
         while (result is { Success: false, FailureKind: not AppUpdateDownloadFailureKind.Cancelled } &&
                SettingsRoot.XamlRoot is not null)
         {
-            var dialog = new ContentDialog
-            {
-                XamlRoot = SettingsRoot.XamlRoot,
-                Title = _localizationService.T("Settings.Update.DownloadFailedTitle"),
-                Content = new TextBlock
-                {
-                    Text = _localizationService.Format(
-                        "Settings.Update.DownloadFailedBody",
-                        ViewModel.UpdateDetailText),
-                    TextWrapping = TextWrapping.Wrap
-                },
-                PrimaryButtonText = _localizationService.T("Settings.Update.OneClick.Retry"),
-                CloseButtonText = _localizationService.T("Common.Cancel"),
-                DefaultButton = ContentDialogButton.Primary
-            };
-
-            if (ViewModel.CanOpenManualUpdateDownload)
-            {
-                dialog.SecondaryButtonText = ViewModel.UpdateFallbackActionText;
-            }
-
-            ContentDialogResult choice = await dialog.ShowAsync();
+            // Raised from a download continuation, so it can land while the
+            // user already has a dialog open on this window; the coordinator
+            // retries briefly instead of crashing on the second ShowAsync.
+            ContentDialogResult choice = await ShowDialogWhenFreeAsync(BuildDownloadFailureDialog);
             if (choice == ContentDialogResult.Secondary)
             {
                 OpenManualUpdateDownload();
@@ -416,6 +437,32 @@ public sealed partial class SettingsWindow
 
             result = await ViewModel.DownloadAvailableUpdateAsync();
         }
+    }
+
+    private ContentDialog BuildDownloadFailureDialog()
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = SettingsRoot.XamlRoot,
+            Title = _localizationService.T("Settings.Update.DownloadFailedTitle"),
+            Content = new TextBlock
+            {
+                Text = _localizationService.Format(
+                    "Settings.Update.DownloadFailedBody",
+                    ViewModel.UpdateDetailText),
+                TextWrapping = TextWrapping.Wrap
+            },
+            PrimaryButtonText = _localizationService.T("Settings.Update.OneClick.Retry"),
+            CloseButtonText = _localizationService.T("Common.Cancel"),
+            DefaultButton = ContentDialogButton.Primary
+        };
+
+        if (ViewModel.CanOpenManualUpdateDownload)
+        {
+            dialog.SecondaryButtonText = ViewModel.UpdateFallbackActionText;
+        }
+
+        return dialog;
     }
 
     private async Task<bool> CreatePreUpdateRecoverySnapshotAsync()
@@ -496,7 +543,10 @@ public sealed partial class SettingsWindow
                 ? "Settings.Update.InstallPathMismatchBody"
                 : "Settings.Update.InstallFailedBody";
 
-        var dialog = new ContentDialog
+        // Queued from the updater process exit path, so it can land while a
+        // user dialog is open; route through the same coordinator as the
+        // download-failure retry dialog.
+        ContentDialogResult choice = await ShowDialogWhenFreeAsync(() => new ContentDialog
         {
             XamlRoot = SettingsRoot.XamlRoot,
             Title = _localizationService.T(titleKey),
@@ -506,11 +556,11 @@ public sealed partial class SettingsWindow
                 TextWrapping = TextWrapping.Wrap
             },
             PrimaryButtonText = ViewModel.UpdateFallbackActionText,
-            CloseButtonText = _localizationService.T("Common.Ok"),
+            CloseButtonText = _localizationService.T("Common.Close"),
             DefaultButton = ContentDialogButton.Close
-        };
+        });
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (choice == ContentDialogResult.Primary)
         {
             OpenManualUpdateDownload();
         }
@@ -518,18 +568,18 @@ public sealed partial class SettingsWindow
 
     private void ViewReleaseNotesButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!ViewModel.CanViewReleaseNotes || ViewModel.LatestUpdateManifest is not { } manifest)
-        {
-            return;
-        }
-
+        // The button is always visible: when no check has produced a
+        // manifest yet the window still opens and resolves its manifest
+        // lazily inside itself.
+        AppUpdateManifest? manifest = ViewModel.LatestUpdateManifest;
         if (_releaseNotesWindow is null)
         {
             var releaseNotesWindow = new ReleaseNotesWindow(
                 manifest,
                 ViewModel.AppVersion,
                 _themeService,
-                _localizationService);
+                _localizationService,
+                manifest is null ? ViewModel.FetchLatestManifestForReleaseNotesAsync : null);
             _releaseNotesWindow = releaseNotesWindow;
             releaseNotesWindow.Closed += (_, _) =>
             {
@@ -539,9 +589,13 @@ public sealed partial class SettingsWindow
                 }
             };
         }
-        else
+        else if (manifest is not null)
         {
             _releaseNotesWindow.UpdateManifest(manifest, ViewModel.AppVersion);
+        }
+        else
+        {
+            _releaseNotesWindow.RetryManifestLoad();
         }
 
         _releaseNotesWindow.ShowWindow(_hWnd);

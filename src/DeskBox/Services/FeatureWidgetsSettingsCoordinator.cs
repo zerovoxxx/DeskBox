@@ -38,7 +38,8 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
         return new MusicPresentationSettings(
             music.MusicUseArtworkBackdrop,
             music.MusicEnableCoverHoverMotion,
-            SettingsService.NormalizeMusicDisplayMode(music.MusicDisplayMode));
+            SettingsService.NormalizeMusicDisplayMode(music.MusicDisplayMode),
+            music.MusicHideTimelineWhenUnavailable);
     }
 
     public WeatherPresentationSettings ReadWeatherPresentation()
@@ -51,6 +52,7 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
             WeatherOptionKinds.NormalizeWindSpeedUnit(weather.WeatherWindSpeedUnit),
             WeatherOptionKinds.NormalizeDefaultView(weather.WeatherDefaultView),
             WeatherOptionKinds.NormalizeSkin(weather.WeatherSkin),
+            WeatherOptionKinds.NormalizeIconStyle(weather.WeatherIconStyle),
             WeatherOptionKinds.NormalizeDataSource(weather.WeatherDataSource),
             WeatherOptionKinds.NormalizeRefreshInterval(weather.WeatherRefreshIntervalMinutes),
             weather.WeatherShowForecast,
@@ -113,6 +115,20 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
         return true;
     }
 
+    public bool SetMusicHideTimelineWhenUnavailable(bool value)
+    {
+        ThrowIfStopped();
+        MusicSettingsSlice music = _settings.Settings.Music;
+        if (music.MusicHideTimelineWhenUnavailable == value)
+        {
+            return false;
+        }
+
+        music.MusicHideTimelineWhenUnavailable = value;
+        _settings.SaveDebounced();
+        return true;
+    }
+
     public void ResetMusicPresentationPreferences(bool scheduleSave = true)
     {
         ThrowIfStopped();
@@ -120,12 +136,14 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
         bool changed =
             music.MusicUseArtworkBackdrop != true ||
             music.MusicEnableCoverHoverMotion != true ||
+            music.MusicHideTimelineWhenUnavailable != true ||
             !string.Equals(
                 music.MusicDisplayMode,
                 SettingsService.MusicDisplayModeAuto,
                 StringComparison.Ordinal);
         music.MusicUseArtworkBackdrop = true;
         music.MusicEnableCoverHoverMotion = true;
+        music.MusicHideTimelineWhenUnavailable = true;
         music.MusicDisplayMode = SettingsService.MusicDisplayModeAuto;
         if (scheduleSave && changed)
         {
@@ -167,6 +185,15 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
         return ApplyWeatherPolicy(
             weather => weather.WeatherSkin,
             settings => WeatherSettingsPolicy.SetSkin(settings, input));
+    }
+
+    public bool SetWeatherIconStyle(string? style)
+    {
+        ThrowIfStopped();
+        string input = style ?? string.Empty;
+        return ApplyWeatherPolicy(
+            weather => weather.WeatherIconStyle,
+            settings => WeatherSettingsPolicy.SetIconStyle(settings, input));
     }
 
     public bool SetWeatherDataSource(string? source)
@@ -282,6 +309,10 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
                 weather.WeatherSkin,
                 SettingsService.WeatherSkinRich,
                 StringComparison.Ordinal) ||
+            !string.Equals(
+                weather.WeatherIconStyle,
+                SettingsService.WeatherIconStyleFluent,
+                StringComparison.Ordinal) ||
             weather.WeatherShowForecast != true ||
             weather.WeatherShowSunrise != true ||
             weather.WeatherShowUvIndex != true ||
@@ -298,6 +329,7 @@ public sealed class FeatureWidgetsSettingsCoordinator : IFeatureWidgetsSettings
         weather.WeatherWindSpeedUnit = SettingsService.WeatherWindSpeedUnitKmh;
         weather.WeatherDefaultView = SettingsService.WeatherDefaultViewToday;
         weather.WeatherSkin = SettingsService.WeatherSkinRich;
+        weather.WeatherIconStyle = SettingsService.WeatherIconStyleFluent;
         weather.WeatherShowForecast = true;
         weather.WeatherShowSunrise = true;
         weather.WeatherShowUvIndex = true;

@@ -26,7 +26,7 @@ public sealed class ManagedStorageCopyMigrationTests : IDisposable
             MappedFolderPath = Source, FollowsDefaultStoragePath = true
         });
         var files = new FileService();
-        _manager = new WidgetManager(_settings, files, new OrganizerService(_settings, files),
+        _manager = new WidgetManager(_settings, files, TestOrganizerServices.Create(_settings, files),
             new ThemeService(_settings), new QuickCaptureService(new QuickCaptureStore(Path.Combine(_root, "notes"))),
             () => Path.Combine(_root, "desktop"), recycleManagedFolderDeletes: false);
     }
@@ -425,6 +425,19 @@ public sealed class ManagedStorageCopyMigrationTests : IDisposable
         Assert.Equal(StorageMigrationProblem.DestinationConflict, error.Problem);
         Assert.True(ManagedStorageMigrationPresentation.NeedsNewLocation(error.Problem));
         Assert.Equal("a new unique version", File.ReadAllText(destination));
+        AssertOldMapping();
+    }
+
+    [Fact]
+    public async Task NestedStorageRootClassifiesRootsOverlapInBothDirections()
+    {
+        foreach (string nested in new[] { Path.Combine(Old, "inside"), _root })
+        {
+            var error = await Assert.ThrowsAsync<StorageMigrationException>(
+                () => _manager.UpdateDefaultManagedStorageRootAsync(nested));
+            Assert.Equal(StorageMigrationProblem.RootsOverlap, error.Problem);
+            Assert.True(ManagedStorageMigrationPresentation.NeedsNewLocation(error.Problem));
+        }
         AssertOldMapping();
     }
 

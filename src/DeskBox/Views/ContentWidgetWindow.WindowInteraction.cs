@@ -331,10 +331,7 @@ public sealed partial class ContentWidgetWindow
             ? GetResizeCursorShapeForCurrentState(frameworkElement.Tag as string)
             : InputSystemCursorShape.Arrow;
 
-        var property = typeof(UIElement).GetProperty(
-            "ProtectedCursor",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        property?.SetValue(element, InputSystemCursor.Create(shape));
+        UiElementCursorHelper.SetCursor(element, shape);
     }
 
     // ── Activation ─────────────────────────────────────────────
@@ -357,6 +354,9 @@ public sealed partial class ContentWidgetWindow
         }
 
         _contentHost.OnActivated();
+        // A long-hidden release dropped the decoded custom background; the
+        // surface is cheap to rebuild from disk on the way back in.
+        RecoverCustomBackgroundIfReleased();
         App.Current.WidgetManager?.ReassertRaisedWidgetGroupAfterDeskBoxActivation(
             HWnd,
             "content-window-activated");

@@ -78,6 +78,15 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
 
     public Action? HidePopupCallback;
 
+    /// <summary>
+    /// True when the Everything-backed file-name search is not connected
+    /// (not installed, not enabled, or not running). Drives the empty-state
+    /// hint so an all-empty result list is explained instead of silent.
+    /// </summary>
+    public bool IsFileSearchProviderUnavailable =>
+        _searchEngine.EverythingProvider.CurrentSnapshot.State is
+            not EverythingConnectionState.Connected;
+
     public IntPtr OwnerWindowHandle { get; set; }
 
     [ObservableProperty]
@@ -143,15 +152,6 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
     /// </summary>
     public bool IsApplyingBackgroundResultRefresh { get; private set; }
 
-    /// <summary>Public access to recent queries for UI binding.</summary>
-    public IReadOnlyList<string> RecentQueries => _historyService.RecentQueries;
-
-    /// <summary>Public access to favorite queries for UI binding.</summary>
-    public IReadOnlyList<string> FavoriteQueries => _historyService.FavoriteQueries;
-
-    /// <summary>True if there's any history or recommendations to display.</summary>
-    public bool HasHistoryOrRecommendations => _recentContentItems.Any();
-
     /// <summary>
     /// Whether search history (recent queries + favorites) is currently being
     /// recorded and shown. Driven by the <see cref="AppSettings.SearchSaveHistory"/> flag.
@@ -178,9 +178,6 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
 
     /// <summary>Palette (command) mode: a compact launcher.</summary>
     public bool IsPaletteMode => string.Equals(DisplayMode, "Palette", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>Spotlight mode: the default balanced search experience.</summary>
-    public bool IsSpotlightMode => !IsHomeMode && !IsPaletteMode;
 
     private IReadOnlyList<SearchResultItem> ActivePool => IsQueryActive ? _allResults : _emptyStateItems;
 
@@ -1179,15 +1176,6 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
                 CommitExecution(item);
                 ContentRequested?.Invoke(this, item);
                 return true;
-
-            case SearchResultKind.History:
-            case SearchResultKind.Favorite:
-                if (!string.IsNullOrWhiteSpace(item.HistoryQuery))
-                {
-                    ApplyQuery(item.HistoryQuery);
-                    return true;
-                }
-                break;
         }
 
         return false;
@@ -1243,8 +1231,6 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
                 _historyService.RecordResult(item);
             }
         }
-
-        OnPropertyChanged(nameof(IsCurrentQueryFavorite));
     }
 
     /// <summary>
@@ -1253,51 +1239,6 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
     public void InvokeAction(string actionId)
     {
         ExecuteAction(actionId);
-    }
-
-    /// <summary>
-    /// Sets the search box query (used by history/favorite activation) and re-runs search.
-    /// </summary>
-    public void ApplyQuery(string query)
-    {
-        Query = query;
-        QueryApplied?.Invoke(this, query);
-    }
-
-    /// <summary>
-    /// Whether the current query is pinned as a favorite.
-    /// </summary>
-    public bool IsCurrentQueryFavorite => _historyService.IsFavorite(Query);
-
-    /// <summary>
-    /// Toggles the current query in favorites and returns the new state.
-    /// </summary>
-    public bool ToggleFavoriteForCurrentQuery()
-    {
-        bool isFavorite = _historyService.ToggleFavorite(Query);
-        OnPropertyChanged(nameof(IsCurrentQueryFavorite));
-        return isFavorite;
-    }
-
-    /// <summary>
-    /// Clears all recent search history (one-click cleanup) and refreshes the
-    /// empty-state tabs so the recent-searches tab collapses.
-    /// </summary>
-    public void ClearRecentSearches()
-    {
-        _historyService.ClearRecentHistory();
-        RebuildEmptyStateItems();
-        OnPropertyChanged(nameof(HasHistoryOrRecommendations));
-    }
-
-    /// <summary>
-    /// Clears both favorites and recent searches completely.
-    /// </summary>
-    public void ClearAllHistory()
-    {
-        _historyService.ClearAllHistory();
-        RebuildEmptyStateItems();
-        OnPropertyChanged(nameof(HasHistoryOrRecommendations));
     }
 
     /// <summary>
@@ -1482,11 +1423,6 @@ public sealed partial class SearchPopupViewModel : ObservableObject, IDisposable
 
     /// <summary>Raised when a DeskBox result should open its exact source item.</summary>
     public event EventHandler<SearchResultItem>? ContentRequested;
-
-    /// <summary>
-    /// Raised when a history/favorite query is applied and the search box should update.
-    /// </summary>
-    public event EventHandler<string>? QueryApplied;
 
     /// <summary>
     /// Raised when a recommendation set published before its shell icons

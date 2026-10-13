@@ -168,9 +168,13 @@ public sealed class FileWidgetContentAdapter :
             : Task.CompletedTask;
     }
 
-    // The file surface no longer offers a picker-based add action (#458); the
-    // interface stays implemented so TriggerAddAction simply does nothing.
-    public Task AddFromTitleButtonAsync() => Task.CompletedTask;
+    // The picker-based add action is back: the native dialog pins
+    // FOS_NODEREFERENCELINKS, so adding a shortcut no longer dereferences
+    // and moves its target (issue 458, the reason this was stubbed).
+    public Task AddFromTitleButtonAsync()
+    {
+        return AsContent(View).AddFromTitleButtonAsync();
+    }
 
     public override void ApplyAppearance()
     {
@@ -195,6 +199,16 @@ public sealed class FileWidgetContentAdapter :
     public override void OnWindowRevealCompleted()
     {
         Surface?.OnWindowRevealCompleted();
+    }
+
+    public override void OnWindowLongHidden()
+    {
+        // Model-level only: nulling icons outside the render window keeps
+        // every view warm for the next reveal. The file surface itself must
+        // not grow a long-hidden teardown path (pinned by
+        // WidgetVisualActivityContractTests), so this goes straight to the
+        // view model instead of through the surface.
+        ViewModel.ReleaseUnrenderedItemIcons();
     }
 
     public override void OnCompactStateChanged(bool collapsed)

@@ -136,7 +136,7 @@ public partial class App
         _trayContextMenu = contextMenu;
         PrepareTrayContextMenu(contextMenu);
 
-        _trayWindow = new Window();
+        _trayWindow = new Window { Title = "DeskBox Tray Host" };
         AppBranding.ApplyWindowIcon(_trayWindow.AppWindow);
         // HWND tool-window styles keep helper windows out of the taskbar and
         // Alt+Tab without the shell-dependent IsShownInSwitchers call.
@@ -161,14 +161,15 @@ public partial class App
             {
                 if (WidgetManager is not null)
                 {
-                    SafeFireAndForget(() => ToggleTrayWidgetsAsync("tray-icon"));
+                    SafeFireAndForget(() => ToggleTrayWidgetsAsync(
+                        DeskBox.Services.TrayToggleRequestQueue.TrayIconSource));
                 }
             })
         };
-        _trayMenuHost = new TrayContextMenuHostWindow(
-            contextMenu, WindowNative.GetWindowHandle(_trayWindow));
-        _trayMenuHost.Opened += OnTrayContextMenuHostOpened;
-        ThemeService.TrackWindow(_trayMenuHost);
+        if (!TryCreateTrayContextMenuHost())
+        {
+            SafeFireAndForget(() => RetryTrayContextMenuHostCreationAsync());
+        }
 
         if (_trayWindow.Content is null)
         {
@@ -322,6 +323,75 @@ public partial class App
         {
             Log($"[Tray] Tray surface probe failed: {ex.Message}");
             return false;
+        }
+    }
+
+    private bool TryCreateTrayContextMenuHost()
+    {
+        try
+        {
+            if (IsShuttingDown || _trayIcon is null || _trayWindow is null || _trayContextMenu is null)
+            {
+                return false;
+            }
+
+            if (_trayMenuHost is not null)
+            {
+                return true;
+            }
+
+            _trayMenuHost = new TrayContextMenuHostWindow(
+                _trayContextMenu, WindowNative.GetWindowHandle(_trayWindow));
+            _trayMenuHost.Opened += OnTrayContextMenuHostOpened;
+            try
+            {
+                ThemeService.TrackWindow(_trayMenuHost);
+            }
+            catch (Exception ex)
+            {
+                Log($"[Tray] Tray menu theme tracking not applied: {ex.Message}");
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"[Tray] Tray context menu host creation failed: {ex.Message}");
+            _trayContextMenuModePolicy.RecordFailure();
+            return false;
+        }
+    }
+
+    private async Task RetryTrayContextMenuHostCreationAsync()
+    {
+        for (int attempt = 2; attempt <= TrayCreationMaxAttempts; attempt++)
+        {
+            await Task.Delay(TrayCreationRetryDelay);
+            if (IsShuttingDown || _trayIcon is not { } trayIcon ||
+                _trayContextMenuModePolicy.IsDegradedToPopupMenu)
+            {
+                return;
+            }
+
+            if (TryCreateTrayContextMenuHost())
+            {
+                Log($"[Tray] Tray context menu host created on retry attempt {attempt}");
+                _trayContextMenuModePolicy.RecordSuccess();
+                return;
+            }
+
+            if (_trayContextMenuModePolicy.IsDegradedToPopupMenu)
+            {
+                try
+                {
+                    SwitchTrayContextMenuToNativeMode(trayIcon);
+                }
+                catch (Exception ex)
+                {
+                    Log($"[Tray] Failed to degrade tray context menu to native PopupMenu mode: {ex.Message}");
+                }
+
+                return;
+            }
         }
     }
 
@@ -531,7 +601,16 @@ public partial class App
 
         try
         {
-            _trayMenuHost?.ShowMenu(point);
+            if (_trayMenuHost is null && !TryCreateTrayContextMenuHost())
+            {
+                if (_trayContextMenuModePolicy.IsDegradedToPopupMenu)
+                {
+                    DegradeTrayContextMenuToNativeMode(_trayIcon, point);
+                }
+                return;
+            }
+
+            _trayMenuHost!.ShowMenu(point);
             _trayContextMenuModePolicy.RecordSuccess();
         }
         catch (Exception ex) when (IsSecondWindowHostFailure(ex))
@@ -629,16 +708,21 @@ public partial class App
     {
         try
         {
-            trayIcon.ContextMenuMode = ContextMenuMode.PopupMenu;
-            // PopupMenu does not initialize H.NotifyIcon's SecondWindow host.
-            trayIcon.ContextFlyout = _trayContextMenu;
-            Log("[Tray] Tray context menu degraded to native PopupMenu mode (SecondWindow host failed to initialize)");
+            SwitchTrayContextMenuToNativeMode(trayIcon);
             ShowTrayContextMenuInNativeMode(point);
         }
         catch (Exception ex)
         {
             Log($"[Tray] Failed to degrade tray context menu to native PopupMenu mode: {ex.Message}");
         }
+    }
+
+    private void SwitchTrayContextMenuToNativeMode(TaskbarIcon trayIcon)
+    {
+        trayIcon.ContextMenuMode = ContextMenuMode.PopupMenu;
+        // Assign only after selecting PopupMenu to avoid H.NotifyIcon's host.
+        trayIcon.ContextFlyout = _trayContextMenu;
+        Log("[Tray] Tray context menu degraded to native PopupMenu mode (SecondWindow host failed to initialize)");
     }
 
     internal void ShowTrayContextMenuForOnboarding()
@@ -962,7 +1046,7 @@ public partial class App
 
         _trayIcon.ToolTipText = _widgetsRaisedFromTray
             ? LocalizationService.T("Tray.TooltipRaised")
-            : LocalizationService.T("Tray.Tooltip");
+            : LocalizationService.T("Tray.TooltipNormal");
     }
 
     private static string GetCreateEntryText(WidgetContentDescriptor descriptor, LocalizationService localization)
@@ -1075,7 +1159,12 @@ public partial class App
     private void ShowFolderMappingFailure(string message)
     {
         string title = LocalizationService.T("Common.NewFolderMapping");
-        if (_nativeNotificationService?.TryShow(title, message) == true || _trayIcon is null)
+        if (_nativeNotificationService?.TryShow(
+                title,
+                message,
+                options: new NativeAppNotificationOptions(
+                    Tag: FolderMappingConflictNotificationTag,
+                    Group: FolderMappingNotificationGroup)) == true || _trayIcon is null)
         {
             return;
         }
@@ -1101,18 +1190,75 @@ public partial class App
 
     internal IntPtr GetFolderPickerOwnerWindowHandle()
     {
-        if (_trayWindow is null)
+        // A picker dialog follows its owner's virtual desktop and DWM cloak
+        // state: when the tray host stays behind on a desktop the user has
+        // switched away from, it is shell-cloaked and a dialog owned by it
+        // never composes (issue 489). Prefer the tray host while it is
+        // usable, then a window that is demonstrably on the active desktop,
+        // and recreate the hidden helper as a last resort — a fresh window
+        // always lands on the active desktop.
+        IntPtr trayHwnd = _trayWindow is null
+            ? IntPtr.Zero
+            : WindowNative.GetWindowHandle(_trayWindow);
+        IntPtr settingsHwnd = _settingsWindow is null
+            ? IntPtr.Zero
+            : WindowNative.GetWindowHandle(_settingsWindow);
+        IntPtr helperHwnd = _folderPickerHelperWindow is null
+            ? IntPtr.Zero
+            : WindowNative.GetWindowHandle(_folderPickerHelperWindow);
+
+        return PickerOwnerResolutionPolicy.Resolve(
+            IsUsablePickerOwner(trayHwnd),
+            IsUsablePickerOwner(settingsHwnd) &&
+                Win32Helper.IsWindowVisible(settingsHwnd),
+            IsUsablePickerOwner(helperHwnd)) switch
         {
-            throw new InvalidOperationException("The tray owner window has not been created.");
+            PickerOwnerSource.TrayWindow => trayHwnd,
+            PickerOwnerSource.SettingsWindow => settingsHwnd,
+            PickerOwnerSource.CachedHelperWindow => helperHwnd,
+            _ => RecreateFolderPickerHelperWindow()
+        };
+    }
+
+    private static bool IsUsablePickerOwner(IntPtr ownerHwnd)
+    {
+        return ownerHwnd != IntPtr.Zero &&
+            Win32Helper.IsWindow(ownerHwnd) &&
+            !Win32Helper.IsWindowCloaked(ownerHwnd);
+    }
+
+    private IntPtr RecreateFolderPickerHelperWindow()
+    {
+        if (_folderPickerHelperWindow is not null)
+        {
+            try
+            {
+                _folderPickerHelperWindow.Close();
+            }
+            catch (Exception ex)
+            {
+                Log($"[FolderPicker] Stale helper window close failed: {ex.Message}");
+            }
+
+            _folderPickerHelperWindow = null;
         }
 
-        IntPtr ownerHwnd = WindowNative.GetWindowHandle(_trayWindow);
-        if (ownerHwnd == IntPtr.Zero || !Win32Helper.IsWindow(ownerHwnd))
+        // Same shape as the tray host (1x1, out of the switcher), never
+        // activated: the native hwnd exists from construction, and creating
+        // the window now assigns it to the active virtual desktop.
+        var helper = new Window { Title = "DeskBox Picker Host" };
+        WindowShellState.TryHideFromSwitchers(helper.AppWindow);
+        try
         {
-            throw new InvalidOperationException("The tray owner window handle is unavailable.");
+            helper.AppWindow.Resize(new Windows.Graphics.SizeInt32(1, 1));
+        }
+        catch (Exception ex)
+        {
+            Log($"[FolderPicker] Helper window resize not applied: {ex.Message}");
         }
 
-        return ownerHwnd;
+        _folderPickerHelperWindow = helper;
+        return WindowNative.GetWindowHandle(helper);
     }
 
     private void OpenSettingsFromTray()

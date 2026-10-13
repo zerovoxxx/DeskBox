@@ -637,18 +637,9 @@ public sealed partial class FileService
 
         try
         {
-            string name = Path.GetFileName(normalizedPath);
-            System.IO.FileAttributes attributes = File.GetAttributes(normalizedPath);
-            // Stale Steam game shortcuts (.url whose game is uninstalled) are
-            // deliberately NOT filtered: opening them launches Steam's install
-            // flow, so they remain useful and must stay visible in the box.
-            if (name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) ||
-                (attributes & System.IO.FileAttributes.Hidden) != 0)
-            {
-                return FolderEntryRefreshStatus.Filtered;
-            }
-
-            return FolderEntryRefreshStatus.Available;
+            return ClassifyExistingEntry(
+                Path.GetFileName(normalizedPath),
+                File.GetAttributes(normalizedPath));
         }
         catch (UnauthorizedAccessException)
         {
@@ -664,6 +655,90 @@ public sealed partial class FileService
             // now be read is a race/provider failure, not proof of deletion.
             return FolderEntryRefreshStatus.Unavailable;
         }
+    }
+
+    /// <summary>
+    /// Classifies one direct child against the live file system with a single
+    /// stat, replacing the per-batch full-root enumeration the incremental
+    /// refresh path used to pay. A missing final path component is the same
+    /// deletion proof the complete-parent snapshot provided; a missing
+    /// ancestor directory stays Unavailable so an offline watched root can
+    /// never be read as a mass deletion of its children.
+    /// </summary>
+    internal static FolderEntryRefreshStatus ClassifyDirectChild(string path)
+    {
+        string normalizedPath;
+        try
+        {
+            normalizedPath = Path.GetFullPath(path);
+        }
+        catch
+        {
+            return FolderEntryRefreshStatus.Unavailable;
+        }
+
+        try
+        {
+            return ClassifyExistingEntry(
+                Path.GetFileName(normalizedPath),
+                File.GetAttributes(normalizedPath));
+        }
+        catch (FileNotFoundException)
+        {
+            // The leaf entry itself is gone while its parent enumerated - the
+            // per-path equivalent of "absent from a complete snapshot".
+            return FolderEntryRefreshStatus.NotFound;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return FolderEntryRefreshStatus.Unavailable;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return FolderEntryRefreshStatus.AccessDenied;
+        }
+        catch (System.Security.SecurityException)
+        {
+            return FolderEntryRefreshStatus.AccessDenied;
+        }
+        catch (IOException)
+        {
+            // A path that cannot be read right now is a race/provider failure,
+            // not proof of deletion - the same contract as the snapshot-based
+            // classification.
+            return FolderEntryRefreshStatus.Unavailable;
+        }
+    }
+
+    /// <summary>
+    /// Runs the shared display-filter classification over an entry whose
+    /// attributes were just read successfully.
+    /// </summary>
+    private static FolderEntryRefreshStatus ClassifyExistingEntry(
+        string name,
+        System.IO.FileAttributes attributes)
+    {
+        // Stale Steam game shortcuts (.url whose game is uninstalled) are
+        // deliberately NOT filtered: opening them launches Steam's install
+        // flow, so they remain useful and must stay visible in the box.
+        if (name.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase) ||
+            (attributes & System.IO.FileAttributes.Hidden) != 0)
+        {
+            return FolderEntryRefreshStatus.Filtered;
+        }
+
+        return FolderEntryRefreshStatus.Available;
+    }
+
+    /// <summary>
+    /// Async wrapper for <see cref="ClassifyDirectChild(string)"/>: the stat
+    /// is blocking I/O and the refresh pipeline awaits it from the UI thread,
+    /// so it hops to the thread pool exactly like the snapshot enumeration it
+    /// replaced.
+    /// </summary>
+    internal static Task<FolderEntryRefreshStatus> ClassifyDirectChildAsync(string path)
+    {
+        return Task.Run(() => ClassifyDirectChild(path));
     }
 
     /// <summary>
@@ -1368,14 +1443,6 @@ public sealed partial class FileService
     }
 
     /// <summary>
-    /// Move or copy the given files or folders into a destination folder.
-    /// </summary>
-    public async Task TransferItemsAsync(IEnumerable<string> sourcePaths, string destinationFolder, bool move)
-    {
-        await TransferItemsWithResultAsync(sourcePaths, destinationFolder, move);
-    }
-
-    /// <summary>
     /// Move or copy the given files or folders into a destination folder and return the realized destination paths.
     /// </summary>
     public async Task<IReadOnlyList<FileTransferResult>> TransferItemsWithResultAsync(
@@ -1790,22 +1857,6 @@ public sealed partial class FileService
     }
 
     /// <summary>
-    /// Move the given files or folders into a destination folder.
-    /// </summary>
-    public async Task MoveItemsAsync(IEnumerable<string> sourcePaths, string destinationFolder)
-    {
-        await TransferItemsAsync(sourcePaths, destinationFolder, move: true);
-    }
-
-    /// <summary>
-    /// Copy the given files or folders into a destination folder.
-    /// </summary>
-    public async Task CopyItemsAsync(IEnumerable<string> sourcePaths, string destinationFolder)
-    {
-        await TransferItemsAsync(sourcePaths, destinationFolder, move: false);
-    }
-
-    /// <summary>
     /// Renames one file-system entry without falling back to a copy or a
     /// child-by-child move. A rename must either complete atomically or leave
     /// the source and destination untouched.
@@ -1863,7 +1914,54 @@ public sealed partial class FileService
         }
 
         return await Task.Run(() =>
-            DeleteEntryWithShell(normalizedPath, ownerHandle, allowUndo: true));
+        {
+            if (ownerHandle == IntPtr.Zero && IsNetworkVolumePath(normalizedPath))
+            {
+                // FOF_ALLOWUNDO degrades to a silent permanent delete on
+                // volumes without a client-side Recycle Bin. A headless
+                // caller cannot consent to that, so refuse instead: callers
+                // treat false as "not deleted" and may retry with an owner
+                // window for the interactive Shell confirmation.
+                App.Log(
+                    $"[FileService] Refused headless recycle on a network volume: '{normalizedPath}'");
+                return false;
+            }
+
+            return DeleteEntryWithShell(normalizedPath, ownerHandle, allowUndo: true);
+        });
+    }
+
+    /// <summary>
+    /// True when the path sits on a network volume (UNC share or mapped
+    /// network drive) — i.e. a volume where FOF_ALLOWUNDO cannot guarantee
+    /// a Recycle Bin and a "recycle" silently becomes a permanent delete.
+    /// Detection failures deliberately report false: the caller falls back
+    /// to the pre-existing behavior rather than blocking routine deletes.
+    /// </summary>
+    internal static bool IsNetworkVolumePath(string path)
+    {
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            string root = Path.GetPathRoot(fullPath) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(root) ||
+                root.Length < 2 ||
+                root[1] != Path.VolumeSeparatorChar)
+            {
+                return false;
+            }
+
+            return new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

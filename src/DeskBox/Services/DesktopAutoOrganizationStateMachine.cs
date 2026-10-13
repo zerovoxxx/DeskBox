@@ -283,17 +283,6 @@ internal sealed class DesktopAutoOrganizationStateMachine
         }
     }
 
-    public IReadOnlyList<string> GetDeferredPaths()
-    {
-        lock (_gate)
-        {
-            return _entries.Values
-                .Where(entry => entry.State == DesktopAutoOrganizationItemState.Deferred)
-                .Select(entry => entry.Path)
-                .ToArray();
-        }
-    }
-
     public IReadOnlyList<string> GetNonTerminalPaths()
     {
         lock (_gate)

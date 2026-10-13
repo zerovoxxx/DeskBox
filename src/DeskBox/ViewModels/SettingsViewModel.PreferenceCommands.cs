@@ -14,8 +14,6 @@ namespace DeskBox.ViewModels;
 
 public partial class SettingsViewModel
 {
-    public Color GetCurrentAccentColor() => _currentAccentColor;
-
     // Host-side working state for the accent card. The XAML binding surface
     // lives on the appearance editor (section-level DataContext switch); the
     // shell keeps the accent-mode flag its theme-service write chain needs

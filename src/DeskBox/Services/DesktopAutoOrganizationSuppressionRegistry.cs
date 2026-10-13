@@ -41,6 +41,12 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
     private const string DraggedArrivalOperationId = "drag-out";
     private const int LedgerVersion = 1;
 
+    // Bounds the persisted ledger so a runaway writer cannot turn it back
+    // into a multi-megabyte store. Real activity stays in the tens of
+    // entries; eviction order is closest-to-expiry-first, which only ever
+    // drops claims with the least remaining protection.
+    internal const int MaxEntries = 1000;
+
     private readonly object _gate = new();
     private readonly Dictionary<string, SuppressionEntry> _entries =
         new(StringComparer.OrdinalIgnoreCase);
@@ -50,6 +56,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
     private readonly TimeSpan _pendingLifetime;
     private readonly string? _ledgerPath;
     private Task _persistTail = Task.CompletedTask;
+    private bool _ledgerLoaded;
 
     public DesktopAutoOrganizationSuppressionRegistry(
         Func<DateTimeOffset>? utcNow = null,
@@ -63,10 +70,10 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
         _evaluationMargin = evaluationMargin ?? EvaluationHorizonMargin;
         _pendingLifetime = pendingLifetime ?? DraggedArrivalPendingLifetime;
         _ledgerPath = ledgerPath;
-        if (_ledgerPath is not null)
-        {
-            LoadLedger();
-        }
+        // The ledger is loaded on first use instead of at construction:
+        // startup used to pay a synchronous full-file deserialize that the
+        // first real consumer (the watcher's first evaluation, or a manual
+        // restore) would not need until much later.
     }
 
     public void BeginOperation(
@@ -77,6 +84,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
         DateTimeOffset expiresAt = now + _lifetime;
         lock (_gate)
         {
+            EnsureLedgerLoadedLocked();
             RemoveExpiredEntriesLocked();
             foreach (FileService.FileTransferPlan plan in plans)
             {
@@ -101,6 +109,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
                     RequiresArrivalEvidence: true);
             }
 
+            EvictOverflowLocked();
             PersistLedgerLocked();
         }
     }
@@ -116,6 +125,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
         DateTimeOffset expiresAt = _utcNow() + _lifetime;
         lock (_gate)
         {
+            EnsureLedgerLoadedLocked();
             RemoveExpiredEntriesLocked();
             foreach ((string path, SuppressionEntry entry) in _entries.ToArray())
             {
@@ -138,6 +148,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
                 };
             }
 
+            EvictOverflowLocked();
             PersistLedgerLocked();
         }
     }
@@ -166,6 +177,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
             now + Max(_pendingLifetime, horizon);
         lock (_gate)
         {
+            EnsureLedgerLoadedLocked();
             RemoveExpiredEntriesLocked();
             foreach ((string sourcePath, string destinationPath) in arrivals)
             {
@@ -211,6 +223,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
                 }
             }
 
+            EvictOverflowLocked();
             PersistLedgerLocked();
         }
     }
@@ -225,6 +238,7 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
 
         lock (_gate)
         {
+            EnsureLedgerLoadedLocked();
             RemoveExpiredEntriesLocked();
             if (!_entries.TryGetValue(normalized, out SuppressionEntry? entry))
             {
@@ -309,6 +323,42 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
         DateTimeOffset now = _utcNow();
         foreach (string path in _entries
                      .Where(pair => pair.Value.ExpiresAt <= now)
+                     .Select(pair => pair.Key)
+                     .ToArray())
+        {
+            _entries.Remove(path);
+        }
+    }
+
+    /// <summary>
+    /// First-use ledger load, always called under <see cref="_gate"/>. The
+    /// flag is set before loading so a re-entrant public call cannot retry;
+    /// the load itself runs its awaits on the pool for the same deadlock
+    /// reasons the constructor load used to.
+    /// </summary>
+    private void EnsureLedgerLoadedLocked()
+    {
+        if (_ledgerLoaded || _ledgerPath is null)
+        {
+            return;
+        }
+
+        _ledgerLoaded = true;
+        LoadLedger();
+        EvictOverflowLocked();
+    }
+
+    private void EvictOverflowLocked()
+    {
+        if (_entries.Count <= MaxEntries)
+        {
+            return;
+        }
+
+        foreach (string path in _entries
+                     .OrderBy(pair => pair.Value.ExpiresAt)
+                     .ThenBy(pair => pair.Value.RegisteredAt)
+                     .Take(_entries.Count - MaxEntries)
                      .Select(pair => pair.Key)
                      .ToArray())
         {
@@ -419,6 +469,20 @@ internal sealed class DesktopAutoOrganizationSuppressionRegistry
         {
             App.Log(
                 $"[DesktopOrganization] Suppression ledger load failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Returns a task that completes when every queued ledger persist has
+    /// finished. Directory-teardown paths (tests) must await this before
+    /// deleting the ledger's directory so an in-flight temp-file write
+    /// cannot race the deletion.
+    /// </summary>
+    public Task WaitForPendingPersistAsync()
+    {
+        lock (_gate)
+        {
+            return _persistTail;
         }
     }
 

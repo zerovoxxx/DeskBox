@@ -32,7 +32,7 @@ public sealed class ManagedStorageMigrationSafetyTests : IDisposable
         _widgetManager = new WidgetManager(
             _settingsService,
             _fileService,
-            new OrganizerService(_settingsService, _fileService),
+            TestOrganizerServices.Create(_settingsService, _fileService),
             new ThemeService(_settingsService),
             new QuickCaptureService(new QuickCaptureStore(Path.Combine(_tempRoot, "quick-capture"))),
             () => Path.Combine(_tempRoot, "desktop"),

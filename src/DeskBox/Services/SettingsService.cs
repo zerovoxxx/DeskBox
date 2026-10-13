@@ -261,8 +261,6 @@ public sealed class SettingsService
     public const int MaxFileStackExtensionsPerRule = FileStackOptionKinds.MaxExtensionsPerRule;
     public const int DefaultQuickCaptureItemPreviewLineCount = 3;
     public const int DefaultTodoItemPreviewLineCount = TodoOptionKinds.DefaultItemPreviewLineCount;
-    [Obsolete("Use the feature-specific preview line defaults.")]
-    public const int DefaultItemPreviewLineCount = DefaultQuickCaptureItemPreviewLineCount;
     public const int MinItemPreviewLineCount = QuickCaptureOptionKinds.MinItemPreviewLineCount;
     public const int MaxItemPreviewLineCount = QuickCaptureOptionKinds.MaxItemPreviewLineCount;
     public const string EditorEnterBehaviorCtrlEnterSaves = QuickCaptureOptionKinds.EnterBehaviorCtrlEnterSaves;
@@ -355,6 +353,10 @@ public const string WeatherDefaultViewToday = WeatherOptionKinds.DefaultViewToda
 public const string WeatherDefaultViewWeek = WeatherOptionKinds.DefaultViewWeek;
 public const string WeatherSkinStandard = WeatherOptionKinds.SkinStandard;
 public const string WeatherSkinRich = WeatherOptionKinds.SkinRich;
+public const string WeatherIconStyleDeskBox = WeatherOptionKinds.IconStyleDeskBox;
+public const string WeatherIconStyleFlat = WeatherOptionKinds.IconStyleFlat;
+public const string WeatherIconStyleLine = WeatherOptionKinds.IconStyleLine;
+public const string WeatherIconStyleFluent = WeatherOptionKinds.IconStyleFluent;
 public const string WeatherDataSourceMsn = WeatherOptionKinds.DataSourceMsn;
 public const string WeatherDataSourceOpenMeteo = WeatherOptionKinds.DataSourceOpenMeteo;
 public const int WeatherRefreshMinMinutes = WeatherOptionKinds.RefreshMinMinutes;
@@ -376,6 +378,11 @@ public const int DefaultSearchMaxResults = 100;
                 [nameof(AppSettings.WidgetGroups)] = DefaultPreferencePreservationReason.UserData,
                 [nameof(AppSettings.WidgetTopologyLayouts)] = DefaultPreferencePreservationReason.UserData,
                 [nameof(AppSettings.ActiveWidgetTopologyKey)] = DefaultPreferencePreservationReason.RuntimeState,
+                // Device-local monitor identity; the screen it names may not
+                // exist on the machine "reset defaults" runs on.
+                [nameof(AppSettings.WidgetDefaultBoundScreenId)] = DefaultPreferencePreservationReason.UserData,
+                [nameof(AppSettings.WidgetNewPlacementTarget)] = DefaultPreferencePreservationReason.UserChoice,
+                [nameof(AppSettings.WidgetDisplayDisconnectBehavior)] = DefaultPreferencePreservationReason.UserChoice,
                 [nameof(AppSettings.WidgetCapsuleBarOrder)] = DefaultPreferencePreservationReason.UserData,
                 [nameof(AppSettings.WidgetCapsuleFreePlacements)] = DefaultPreferencePreservationReason.UserData,
                 [nameof(AppSettings.DeletedWidgetIds)] = DefaultPreferencePreservationReason.UserData,
@@ -409,6 +416,9 @@ public const int DefaultSearchMaxResults = 100;
 
     private readonly string _settingsPath;
     private AppSettings _settings = new();
+    // Set at load when the on-disk settings.json carries a schema version
+    // from a newer build; every save is refused for the session.
+    private bool _settingsSchemaNewerThanBuild;
     private readonly object _lock = new();
 
     // The settings.json / widget-layout.json commit pair is protected by a
@@ -503,6 +513,15 @@ public const int DefaultSearchMaxResults = 100;
         settings.WidgetForegroundColor = WidgetForegroundSettings.DefaultCustomColorHex;
         settings.WidgetBorderColorMode = WidgetBorderColorModeNeutral;
         settings.WidgetBorderStyle = WidgetBorderStyleThin;
+        // Schema-v10 background fields reset through the slice so the
+        // facade-access ratchet stays untouched.
+        WidgetShellSettingsSlice backgroundShell = settings.WidgetShell;
+        backgroundShell.WidgetBackgroundMode = null;
+        backgroundShell.WidgetBackgroundUnifiedImage = null;
+        backgroundShell.WidgetBackgroundPanoramaImage = null;
+        backgroundShell.WidgetBackgroundDim = null;
+        backgroundShell.WidgetBackgroundUnifiedFit = null;
+        backgroundShell.WidgetTextShadowEnabled = false;
         settings.WidgetAnimationEffect = WidgetAnimationEffectSlideFade;
         settings.WidgetAnimationSpeed = WidgetAnimationSpeedStandard;
         settings.WidgetAnimationSlideDirection = WidgetAnimationSlideDirectionRight;
@@ -519,6 +538,9 @@ public const int DefaultSearchMaxResults = 100;
             WidgetGroupTitleDisplayModes.IconAndText;
         settings.WidgetGroupWheelSwitchEnabled = true;
         settings.WidgetGroupHoverSwitchEnabled = false;
+        // Reset through the slice so the facade-access ratchet stays untouched.
+        settings.WidgetLayout.WidgetGroupSwitchAnimationStyle =
+            WidgetGroupSwitchAnimationStyles.Auto;
         settings.WidgetGroupsEnabled = true;
         settings.LegacyWidgetCapsuleModeEnabled = null;
         settings.WidgetCompactWidthMode = WidgetCompactWidthModeAligned;
@@ -597,6 +619,7 @@ public const int DefaultSearchMaxResults = 100;
         settings.MusicUseArtworkBackdrop = true;
         settings.MusicEnableCoverHoverMotion = true;
         settings.MusicDisplayMode = MusicDisplayModeAuto;
+        settings.MusicHideTimelineWhenUnavailable = true;
 settings.WeatherAutoLocation = true;
 settings.WeatherCityName = string.Empty;
 settings.WeatherLatitude = 0;
@@ -605,6 +628,7 @@ settings.WeatherTemperatureUnit = WeatherTemperatureUnitCelsius;
 settings.WeatherWindSpeedUnit = WeatherWindSpeedUnitKmh;
 settings.WeatherDefaultView = WeatherDefaultViewToday;
 settings.WeatherSkin = WeatherSkinStandard;
+settings.WeatherIconStyle = WeatherIconStyleFluent;
 settings.WeatherDataSource = WeatherDataSourceMsn;
 settings.WeatherShowForecast = true;
 settings.WeatherShowSunrise = true;
@@ -748,6 +772,20 @@ settings.FocusClickedWidgetOnRaise = false;
             lock (_lock)
             {
                 _settings = loadResult.Value;
+                // A settings.json stamped by a NEWER build must never be
+                // overwritten by this one: the typed model silently drops its
+                // unknown fields, so a save would strip them irreversibly
+                // (and the stripped file would never re-migrate). Same stance
+                // the widget-layout store takes via Layout.CanWrite.
+                _settingsSchemaNewerThanBuild = loadedFromDisk &&
+                    _settings.SchemaVersion > SettingsMigrationPipeline.CurrentSchemaVersion;
+                if (_settingsSchemaNewerThanBuild)
+                {
+                    App.Log(
+                        $"[SettingsService] settings.json schema {_settings.SchemaVersion} is newer " +
+                        $"than this build ({SettingsMigrationPipeline.CurrentSchemaVersion}); " +
+                        "this session's changes cannot persist");
+                }
             }
 
             bool changed;
@@ -958,6 +996,15 @@ settings.FocusClickedWidgetOnRaise = false;
 
     private async Task<bool> SaveToFileOnlyAsync()
     {
+        if (_settingsSchemaNewerThanBuild)
+        {
+            App.Log(
+                "[SettingsService] Save refused: settings.json schema " +
+                $"{_settings.SchemaVersion} is newer than this build understands; " +
+                "settings changes cannot persist");
+            return false;
+        }
+
         await FileWriteLock.WaitAsync();
         try
         {
@@ -1399,6 +1446,63 @@ settings.FocusClickedWidgetOnRaise = false;
         }
     }
 
+    /// <summary>
+    /// Downgrades pins that lost their bound monitor id (hand-edited settings,
+    /// partial migration) back to the legacy unbound chain so resolution can
+    /// never dead-end on an empty reference. Internal for direct policy tests.
+    /// </summary>
+    internal static void NormalizeScreenBindings(AppSettings settings)
+    {
+        foreach (WidgetConfig widget in settings.Widgets)
+        {
+            if (widget.ScreenBindingMode == WidgetScreenBindingMode.Pinned &&
+                string.IsNullOrWhiteSpace(widget.BoundScreenId))
+            {
+                widget.ScreenBindingMode = WidgetScreenBindingMode.Unbound;
+                widget.BoundScreenId = null;
+            }
+        }
+
+        foreach (WidgetGroupConfig group in settings.WidgetGroups)
+        {
+            if (group.ScreenBindingMode == WidgetScreenBindingMode.Pinned &&
+                string.IsNullOrWhiteSpace(group.BoundScreenId))
+            {
+                group.ScreenBindingMode = WidgetScreenBindingMode.Unbound;
+                group.BoundScreenId = null;
+            }
+        }
+
+        settings.WidgetNewPlacementTarget = NormalizeWidgetNewPlacementTarget(
+            settings.WidgetNewPlacementTarget);
+        settings.WidgetDisplayDisconnectBehavior = NormalizeWidgetDisplayDisconnectBehavior(
+            settings.WidgetDisplayDisconnectBehavior);
+    }
+
+    public const string WidgetNewPlacementCursorDisplay = "CursorDisplay";
+    public const string WidgetNewPlacementMainDisplay = "MainDisplay";
+    public const string WidgetNewPlacementSpecificDisplay = "SpecificDisplay";
+
+    public static string NormalizeWidgetNewPlacementTarget(string? value)
+    {
+        return value switch
+        {
+            WidgetNewPlacementMainDisplay => WidgetNewPlacementMainDisplay,
+            WidgetNewPlacementSpecificDisplay => WidgetNewPlacementSpecificDisplay,
+            _ => WidgetNewPlacementCursorDisplay
+        };
+    }
+
+    public const string WidgetDisplayDisconnectMoveToRemaining = "MoveToRemaining";
+    public const string WidgetDisplayDisconnectCollapseToCapsule = "CollapseToCapsule";
+
+    public static string NormalizeWidgetDisplayDisconnectBehavior(string? value)
+    {
+        return string.Equals(value, WidgetDisplayDisconnectCollapseToCapsule)
+            ? WidgetDisplayDisconnectCollapseToCapsule
+            : WidgetDisplayDisconnectMoveToRemaining;
+    }
+
     private static bool NormalizeWidgetTopologyLayouts(AppSettings settings)
     {
         bool changed = false;
@@ -1406,9 +1510,11 @@ settings.FocusClickedWidgetOnRaise = false;
         {
             settings.WidgetTopologyLayouts = [];
             settings.ActiveWidgetTopologyKey = null;
+            NormalizeScreenBindings(settings);
             return true;
         }
 
+        NormalizeScreenBindings(settings);
         foreach (string invalidKey in settings.WidgetTopologyLayouts
                      .Where(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null)
                      .Select(pair => pair.Key)
@@ -1417,10 +1523,11 @@ settings.FocusClickedWidgetOnRaise = false;
             changed |= settings.WidgetTopologyLayouts.Remove(invalidKey);
         }
 
-        foreach (WidgetTopologyLayoutProfile profile in settings.WidgetTopologyLayouts.Values)
+        foreach ((string key, WidgetTopologyLayoutProfile profile) in settings.WidgetTopologyLayouts)
         {
             if (profile.Version != WidgetTopologyLayoutProfile.CurrentVersion)
             {
+                WidgetTopologyLayoutService.UpgradeProfile(key, profile, settings.WidgetLayout.ActiveWidgetTopologyKey);
                 profile.Version = WidgetTopologyLayoutProfile.CurrentVersion;
                 changed = true;
             }
@@ -1528,6 +1635,7 @@ settings.FocusClickedWidgetOnRaise = false;
         }
 
         changed |= WidgetForegroundSettings.NormalizeGlobal(settings);
+        changed |= WidgetBackgroundCustomization.NormalizeGlobal(settings);
 
         if (settings.WidgetBorderColorMode is not (
             WidgetBorderColorModeNeutral or
@@ -2468,6 +2576,21 @@ settings.FocusClickedWidgetOnRaise = false;
                 changed = true;
             }
 
+            if (WidgetTitleIconCustomization.NormalizeOverrides(widget))
+            {
+                changed = true;
+            }
+
+            if (WidgetBackgroundCustomization.NormalizeOverrides(widget))
+            {
+                changed = true;
+            }
+
+            if (WidgetBorderCustomization.NormalizeOverrides(widget))
+            {
+                changed = true;
+            }
+
             if (widget.IsDisabled && widget.WidgetKind != WidgetKind.Glance)
             {
                 widget.IsDisabled = false;
@@ -2661,14 +2784,19 @@ settings.FocusClickedWidgetOnRaise = false;
         settings.RecentOrganizationHistory ??= [];
 
         settings.DesktopOrganizationRules ??= [];
-        var validFileWidgetIds = settings.Widgets
-            .Where(widget =>
-                widget.WidgetKind == WidgetKind.File &&
-                !widget.IsDisabled &&
-                !settings.DeletedWidgetIds.Contains(widget.Id) &&
-                !string.IsNullOrWhiteSpace(widget.MappedFolderPath))
+        // Deletion is decided by the widget tombstone (DeletedWidgetIds, or a
+        // target id that no longer resolves to any widget), never by probing
+        // the disk: a detached drive is indistinguishable from a deleted
+        // folder at load time, and widget hydration recreates mapped folders
+        // anyway. Recoverable target states - the widget is disabled, or the
+        // mapped path has not been backfilled yet - leave the rule enabled
+        // and merely pending, so a later re-enable or backfill resumes
+        // organization instead of losing the rule permanently.
+        var liveWidgetIds = settings.Widgets
+            .Where(widget => !settings.DeletedWidgetIds.Contains(widget.Id))
             .Select(widget => widget.Id)
             .ToHashSet(StringComparer.Ordinal);
+        bool deletedTargetDisabled = false;
         var normalizedDesktopRules = settings.DesktopOrganizationRules
             .Where(rule => rule is not null)
             .Select(rule =>
@@ -2685,9 +2813,10 @@ settings.FocusClickedWidgetOnRaise = false;
                     StringComparer.Ordinal);
                 rule.Extensions = NormalizeDesktopOrganizationExtensions(rule.Extensions);
                 rule.ExcludedExtensions = NormalizeDesktopOrganizationExtensions(rule.ExcludedExtensions);
-                if (!validFileWidgetIds.Contains(rule.TargetWidgetId))
+                if (rule.IsEnabled && !liveWidgetIds.Contains(rule.TargetWidgetId))
                 {
                     rule.IsEnabled = false;
+                    deletedTargetDisabled = true;
                 }
                 return rule;
             })
@@ -2700,18 +2829,32 @@ settings.FocusClickedWidgetOnRaise = false;
             changed = true;
         }
         settings.DesktopOrganizationRules = normalizedDesktopRules;
+        // A pending rule still counts as effective for the master switch:
+        // normalize also runs at load time, before widget hydration backfills
+        // MappedFolderPath, and closing the switch there would disable the
+        // feature on every boot (the runtime resolver skips such rules until
+        // the target becomes usable again).
         bool hasEffectiveDesktopOrganizationRule = normalizedDesktopRules.Any(rule =>
             rule.IsEnabled &&
-            validFileWidgetIds.Contains(rule.TargetWidgetId) &&
+            liveWidgetIds.Contains(rule.TargetWidgetId) &&
             (rule.CategoryIds.Count > 0 ||
              rule.SubtypeIds.Count > 0 ||
              rule.Extensions.Count > 0));
         if (settings.DesktopAutoOrganizationEnabled &&
-            !hasEffectiveDesktopOrganizationRule)
+            !hasEffectiveDesktopOrganizationRule &&
+            deletedTargetDisabled)
         {
+            // Only a truly deleted target may close the master switch
+            // automatically; recoverable unavailability keeps the switch on
+            // and is surfaced through a notification instead. The baseline is
+            // preserved on purpose: the watcher reconciles with
+            // BaselineUtc ?? now, and clearing it here would widen the
+            // post-restart organization window.
             settings.DesktopAutoOrganizationEnabled = false;
-            settings.DesktopAutoOrganizationBaselineUtc = null;
             changed = true;
+            App.Log(
+                "[DesktopAutoOrganization] Master switch closed automatically: " +
+                "the last effective rule target widget was deleted.");
         }
         int normalizedAutoOrganizationDelay = DesktopAutoOrganizationPolicy.NormalizeDelaySeconds(
             settings.DesktopOrganization.DesktopAutoOrganizationDelaySeconds);
@@ -3250,6 +3393,13 @@ settings.FocusClickedWidgetOnRaise = false;
         if (!string.Equals(settings.WeatherSkin, normalizedSkin, StringComparison.Ordinal))
         {
             settings.WeatherSkin = normalizedSkin;
+            changed = true;
+        }
+
+        string normalizedIconStyle = WeatherOptionKinds.NormalizeIconStyle(settings.WeatherIconStyle);
+        if (!string.Equals(settings.WeatherIconStyle, normalizedIconStyle, StringComparison.Ordinal))
+        {
+            settings.WeatherIconStyle = normalizedIconStyle;
             changed = true;
         }
 

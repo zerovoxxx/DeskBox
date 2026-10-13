@@ -116,11 +116,30 @@ public sealed partial class WidgetManager
         await MoveManagedFolderContentsToDesktopAsync(normalizedPath);
     }
 
-    public async Task DeleteOrphanManagedStorageFolderAsync(string folderPath)
+    public async Task DeleteOrphanManagedStorageFolderAsync(
+        string folderPath,
+        IntPtr ownerWindowHandle = default)
     {
         string normalizedPath = ValidateOrphanManagedStorageFolderPath(folderPath);
-        await _fileService.DeleteEntryAsync(normalizedPath, recycle: _recycleManagedFolderDeletes);
+        IntPtr ownerHandle = Directory.Exists(normalizedPath) &&
+            FileService.IsNetworkVolumePath(normalizedPath)
+                ? ownerWindowHandle
+                : IntPtr.Zero;
+        if (!await _fileService.DeleteEntryAsync(
+                normalizedPath,
+                recycle: _recycleManagedFolderDeletes,
+                ownerHandle))
+        {
+            // The settings page reports "deleted" on success; a silent no-op
+            // would promise a deletion that never happened.
+            throw new InvalidOperationException(LocalizeOrKey("Widget.Error.ManagedFolderDeleteFailed"));
+        }
     }
+
+    // Test hosts construct this manager without a localization service;
+    // the key itself is the best available fallback message there.
+    private string LocalizeOrKey(string key)
+        => _localizationService?.T(key) ?? key;
 
     public async Task<int> RestoreOrphanManagedStorageFoldersAsync(IEnumerable<string> folderPaths)
     {
@@ -151,6 +170,7 @@ public sealed partial class WidgetManager
                 IsDisabled = false
             };
 
+            ApplyNewWidgetPlacement(config);
             _settingsService.Settings.Widgets.Add(config);
             if (canCreateWindow)
             {
@@ -326,7 +346,7 @@ public sealed partial class WidgetManager
         if (!string.Equals(currentFolderPath, destinationFolderPath, StringComparison.OrdinalIgnoreCase) &&
             !Directory.Exists(destinationFolderPath))
         {
-            await Task.Run(() => Directory.Move(currentFolderPath, destinationFolderPath));
+            await Task.Run(() => MoveManagedFolderWithRetry(currentFolderPath, destinationFolderPath));
         }
 
         WidgetFileStackSettings.RebaseManagedFolderPaths(
@@ -337,6 +357,41 @@ public sealed partial class WidgetManager
         config.MappedFolderPath = destinationFolderPath;
 
         await RefreshFileWidgetAsync(config.Id);
+    }
+
+    /// <summary>
+    /// A managed-folder rename can be denied by a transient handle (antivirus
+    /// scan, search indexer) or a long-lived one (an Explorer window parked
+    /// inside the folder). A short bounded retry absorbs the transient class;
+    /// the persistent class surfaces as a localized, actionable message
+    /// instead of the raw OS denial (feedback 240).
+    /// </summary>
+    private void MoveManagedFolderWithRetry(string sourcePath, string destinationPath)
+    {
+        const int maxAttempts = 3;
+        const int retryDelayMilliseconds = 300;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                Directory.Move(sourcePath, destinationPath);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= maxAttempts)
+                {
+                    App.Log(
+                        "[WidgetManager] Managed folder rename denied after " +
+                        $"{attempt} attempts '{sourcePath}': {ex.Message}");
+                    throw new IOException(
+                        _localizationService.T("Widget.Error.ManagedFolderInUse"),
+                        ex);
+                }
+
+                Thread.Sleep(retryDelayMilliseconds);
+            }
+        }
     }
 
     private void RemoveMappedWidgetShortcut(WidgetConfig config)
@@ -481,7 +536,10 @@ public sealed partial class WidgetManager
         return $"{ManagedShortcutDescriptionPrefix}{widgetId}";
     }
 
-    private async Task ApplyWidgetRemovalActionAsync(WidgetConfig config, WidgetRemovalAction removalAction)
+    private async Task ApplyWidgetRemovalActionAsync(
+        WidgetConfig config,
+        WidgetRemovalAction removalAction,
+        IntPtr ownerWindowHandle = default)
     {
         if (removalAction == WidgetRemovalAction.RemoveWidgetOnly)
         {
@@ -507,7 +565,23 @@ public sealed partial class WidgetManager
 
         if (removalAction == WidgetRemovalAction.DeleteManagedFolder)
         {
-            await _fileService.DeleteEntryAsync(folderPath, recycle: _recycleManagedFolderDeletes);
+            // Local volumes recycle silently as before; on a network volume
+            // the Recycle Bin cannot catch a mistake, so route through the
+            // interactive Shell confirmation when an owner is available.
+            IntPtr ownerHandle = FileService.IsNetworkVolumePath(folderPath)
+                ? ownerWindowHandle
+                : IntPtr.Zero;
+            if (!await _fileService.DeleteEntryAsync(
+                    folderPath,
+                    recycle: _recycleManagedFolderDeletes,
+                    ownerHandle))
+            {
+                // A silent "keep the folder, remove the widget anyway" strands
+                // the user's files in an orphaned directory with no feedback.
+                // Throwing keeps the widget intact and surfaces the failure.
+                throw new InvalidOperationException(
+                    LocalizeOrKey("Widget.Error.ManagedFolderDeleteFailed"));
+            }
         }
     }
 
@@ -531,10 +605,23 @@ public sealed partial class WidgetManager
             await _fileService.ExecuteTransferPlanAsync(plans, move: true);
         }
 
-        if (Directory.Exists(folderPath) && !Directory.EnumerateFileSystemEntries(folderPath).Any())
+        if (!Directory.Exists(folderPath) ||
+            !Directory.EnumerateFileSystemEntries(folderPath).Any())
         {
-            Directory.Delete(folderPath, recursive: false);
+            if (Directory.Exists(folderPath))
+            {
+                Directory.Delete(folderPath, recursive: false);
+            }
+
+            return;
         }
+
+        // Transfer failures come back as per-item results, not exceptions:
+        // anything still inside the folder means the move-back did not
+        // complete. Report it instead of leaving a half-moved state behind
+        // an already-removed widget.
+        throw new InvalidOperationException(
+            LocalizeOrKey("Widget.Error.ManagedFolderMoveIncomplete"));
     }
 
     private string ValidateOrphanManagedStorageFolderPath(string folderPath)

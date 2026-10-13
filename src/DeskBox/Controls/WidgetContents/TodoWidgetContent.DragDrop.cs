@@ -591,7 +591,6 @@ public sealed partial class TodoWidgetContent
 
         item.PropertyChanged -= TodoItem_PropertyChanged;
         item.PropertyChanged += TodoItem_PropertyChanged;
-        ApplyTodoItemTooltips(sender, item);
         SetTodoItemHoverState(sender, false);
         if (sender is Border border)
         {
