@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.5.8.1 - 2026-10-16
+
+- Merge upstream 1.5.8 and subsequent main-branch fixes through bbb9e697, including callback isolation, startup storm protection, and the revised file context menu.
+- Preserve the owned logon tray menu host, native fallback, persisted shortcut icon recovery, and the fourth hydration retry while adopting upstream stacked-member icon retention.
+- 合并官方 1.5.8 及主分支后续修复，保留自有托盘窗口、原生菜单降级和快捷方式图标恢复。
+
+## 1.5.8 - 2026-10-14
+
+### English
+
+#### Fixes
+
+- More accurate administrator notices. The "running as administrator" notice now appears only when DeskBox runs above the shell, so fully elevated desktops — for example company-managed computers — no longer see it. When it appears, it closes the elevated instance in one click and provides the steps to restart with normal privileges, including how to clear a shortcut's "Run as administrator" checkbox. Autostart continues to restart itself with normal privileges silently. Available in all 12 languages.
+- One-click updates no longer bring DeskBox back as administrator: the updater restarts the app at the shell's own level whenever the shell offers a standard-user context, so the app no longer restarts as administrator after an update on machines where it ran elevated.
+- When Explorer itself runs elevated above DeskBox, the app stays usable: the reveal hotkey and settings keep working, an explanatory notice replaces the untranslated failure box, and the rare fatal-startup dialog is localized and lists the diagnosed environment causes (elevated Explorer, compatibility layers, shortcut run-as).
+- Maintenance-wave drag and startup fixes: dragging Todo items no longer crashes; switching groups no longer loses stacked-member icons; cutting a subfolder and pasting it into the parent folder no longer hangs; auto-organization rules stay enabled across restarts instead of being silently switched off.
+- When the desktop repeatedly crashes, DeskBox no longer restarts in a loop at sign-in: a startup ledger breaks the cycle, and diagnostics now include recent DeskBox and Explorer crash events for support.
+- Settings: an update-download failure no longer raises an error when another dialog happens to be open at the same time.
+- The drag-and-drop diagnostic detects a shortcut-level "Run as administrator" flag — an elevation source invisible to the compatibility-layer scan — and explains exactly how to clear it.
+- An instance relaunched with normal privileges can be ended again by an unelevated Task Manager.
+
+### 中文
+
+#### 修复
+
+- 更准确的管理员运行提示。「以管理员身份运行」提示现在只在 DeskBox 以高于资源管理器的权限运行时出现，因此整台电脑都以管理员权限运行的环境（例如公司统一管理的电脑）不再显示该提示。提示出现时，可一键退出当前实例，并按照步骤以普通权限重新打开，其中包含取消快捷方式"以管理员身份运行"勾选的方法；开机自启仍会自动以普通权限重启。全部 12 种语言同步。
+- 一键更新不再把 DeskBox 以管理员身份带回来：只要资源管理器提供标准用户环境，更新器就按其权限级别重启应用，此前以管理员运行的电脑，更新后不会再以管理员身份重新启动。
+- 资源管理器以管理员运行（高于 DeskBox）时，应用保持可用：唤出热键和设置继续工作，说明弹窗替代原先未本地化的错误提示；极少出现的启动失败提示已本地化，并列出诊断到的环境成因（资源管理器提权、兼容层、快捷方式管理员勾选）。
+- 维护波次的拖拽与启动修复：拖动待办不再崩溃；切换分组不再丢失叠放成员图标；剪切子文件夹后粘贴回主目录不再卡死；自动整理规则跨重启保持开启，不再被悄悄关闭。
+- 桌面反复崩溃时，DeskBox 不再在登录时反复重启：启动账本切断循环，诊断包新增近期的 DeskBox 与资源管理器崩溃事件，便于支持排查。
+- 设置：更新下载失败时若恰好有其它对话框打开，不再报错。
+- 拖拽诊断可识别快捷方式级"以管理员身份运行"勾选——这是兼容层扫描看不到的提权来源——并给出精确的取消方法。
+- 以普通权限重启的实例重新可以被未提权的任务管理器结束。
+
 ## 1.5.7.1 - 2026-10-13
 
 - Merge upstream 1.5.7 while preserving the fork's owned tray menu host and persisted shortcut icon recovery.

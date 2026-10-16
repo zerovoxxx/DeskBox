@@ -7,7 +7,7 @@ English | [简体中文](README.zh-CN.md)
 > External pull requests are not being merged at this time — bug reports, ideas, and discussions are very welcome via Issues / Discussions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [![CI](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml/badge.svg)](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml)
-[![Release 1.5.7](https://img.shields.io/badge/release-1.5.7-2563EB.svg)](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.7)
+[![Release 1.5.8](https://img.shields.io/badge/release-1.5.8-2563EB.svg)](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.8)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D4.svg)](#system-requirements)
 [![x64 and ARM64](https://img.shields.io/badge/architecture-x64%20%7C%20ARM64-5C2D91.svg)](#download)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
@@ -41,10 +41,10 @@ All twelve selectable languages share the same resource-key and formatting-place
 
 ## Download
 
-DeskBox 1.5.7 is prepared for release. The [GitHub Releases](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.7) download links below will become available after publication.
+DeskBox 1.5.8 is prepared for release. The [GitHub Releases](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.8) download links below will become available after publication.
 
-- [DeskBox 1.5.7 for x64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.7/DeskBox_Setup_1.5.7_x64.exe), recommended for most Intel and AMD PCs.
-- [DeskBox 1.5.7 for ARM64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.7/DeskBox_Setup_1.5.7_arm64.exe), recommended for Snapdragon, Surface Pro X, and other Windows on ARM PCs.
+- [DeskBox 1.5.8 for x64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.8/DeskBox_Setup_1.5.8_x64.exe), recommended for most Intel and AMD PCs.
+- [DeskBox 1.5.8 for ARM64](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.8/DeskBox_Setup_1.5.8_arm64.exe), recommended for Snapdragon, Surface Pro X, and other Windows on ARM PCs.
 
 Both packages are Full Native AOT builds with the matching private Windows App Runtime 2.5.1, so they can install offline without downloading a separate .NET 10 or Windows App Runtime package.
 
@@ -129,6 +129,14 @@ Every release publishes a matching `.sha256` sidecar for each installer. Code si
 - Back up and restore settings locally, or back up todos, quick captures, and widget styles to your own WebDAV server on a schedule; passwords live in Windows Credential Manager, each data domain toggles independently, and remote snapshots can be browsed and restored in merge or snapshot-faithful mode.
 - Export a privacy-filtered diagnostics package for troubleshooting.
 - Recover settings from resilient snapshots, flush pending changes during shutdown, and report save failures instead of silently reverting to defaults.
+
+## What's new in 1.5.8
+
+- **More accurate administrator notices.** The "running as administrator" notice now appears only when DeskBox runs above the shell, so fully elevated desktops (company-managed machines included) no longer see it. The notice closes the elevated instance in one click and provides the steps to restart with normal privileges, and one-click updates no longer restart the app as administrator.
+- **Graceful under an elevated Explorer.** When Explorer itself runs elevated, DeskBox stays reachable — the reveal hotkey and settings keep working, an explanatory notice replaces the silent English failure box, and diagnostics learn to detect a shortcut's "Run as administrator" flag.
+- **Maintenance wave.** Todo-widget drags no longer crash; switching groups no longer loses stacked-member icons; cutting a subfolder and pasting it back no longer hangs; auto-organization rules survive restarts; a crashing desktop no longer drags DeskBox into a logon restart loop.
+
+Read the complete [changelog](CHANGELOG.md) or the [1.5.8 release notes](docs/releases/v1.5.8.md).
 
 ## What's new in 1.5.7
 
@@ -256,8 +264,8 @@ ISCC.exe /DDeskBoxNativeAot=1 /DDeskBoxBundledRuntime=1 /DMyAppReleaseDir=..\.ar
 Expected outputs:
 
 ```text
-Output\DeskBox_Setup_1.5.7_x64.exe
-Output\DeskBox_Setup_1.5.7_arm64.exe
+Output\DeskBox_Setup_1.5.8_x64.exe
+Output\DeskBox_Setup_1.5.8_arm64.exe
 ```
 
 ## Project layout

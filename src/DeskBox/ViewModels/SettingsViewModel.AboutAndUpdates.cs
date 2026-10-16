@@ -314,7 +314,9 @@ public partial class SettingsViewModel
             return AppUpdateInstallResult.Failed(_localizationService.T("Settings.Update.Detail.DownloadMissing"));
         }
 
-        var result = _appUpdateService.StartInstallerHelper(_downloadedUpdateInstallerPath);
+        var result = _appUpdateService.StartInstallerHelper(
+            _downloadedUpdateInstallerPath,
+            appCultureName: _localizationService.CurrentCultureName);
         if (result.Success)
         {
             UpdateStatusText = _localizationService.T("Settings.Update.Status.Installing");

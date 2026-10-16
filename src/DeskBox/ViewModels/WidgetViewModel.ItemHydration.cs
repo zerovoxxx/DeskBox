@@ -387,14 +387,14 @@ public partial class WidgetViewModel
 
     /// <summary>
     /// Nulls decoded icon references a hidden surface no longer displays.
-    /// RenderedItems members keep their icons so the next reveal paints the
-    /// visible page instantly; the cleared tail rehydrates through the
-    /// existing render-window growth triggers when it scrolls back into
-    /// view. Without this the item models pin every LRU-evicted bitmap for
-    /// their whole lifetime, so a large grid can hold tens of MB the icon
-    /// cache believes it released. Unrendered items are not in any
-    /// ItemsSource, so clearing them is visually inert at any moment —
-    /// including while parking a group member mid switch transition.
+    /// The keep-set is every item a realized UI element still shows: the
+    /// rendered prefix plus the collapsed stack preview members (the tile
+    /// binds Members[0..3] directly), so release and re-acquire stay paired
+    /// on display-state transitions — released items come back through the
+    /// render-window reconcile heal, the growth triggers, and the
+    /// reveal/reuse/popover transitions. Without this the item models pin
+    /// every LRU-evicted bitmap for their whole lifetime, so a large grid
+    /// can hold tens of MB the icon cache believes it released.
     /// </summary>
     internal int ReleaseUnrenderedItemIcons()
     {
@@ -403,11 +403,11 @@ public partial class WidgetViewModel
             return 0;
         }
 
-        var rendered = new HashSet<WidgetItem>(RenderedItems);
+        var displayed = ComputeDisplayedIconKeepSet(RenderedItems);
         int released = 0;
         foreach (var item in Items)
         {
-            if (item.Icon is not null && !rendered.Contains(item))
+            if (item.Icon is not null && !displayed.Contains(item))
             {
                 item.Icon = null;
                 released++;
@@ -415,6 +415,59 @@ public partial class WidgetViewModel
         }
 
         return released;
+    }
+
+    /// <summary>
+    /// Pure keep-set shared with behavior tests: the items whose icons a
+    /// realized UI element currently displays. Stack projection renders
+    /// <see cref="WidgetStackItem"/> wrappers whose collapsed tiles bind the
+    /// first four members' icons, so those members are displayed even though
+    /// they never enter <see cref="RenderedItems"/> themselves.
+    /// </summary>
+    internal static HashSet<WidgetItem> ComputeDisplayedIconKeepSet(
+        IEnumerable<WidgetItem> renderedItems)
+    {
+        var displayed = new HashSet<WidgetItem>(renderedItems);
+        foreach (WidgetItem renderedUnit in displayed.ToArray())
+        {
+            if (renderedUnit is not WidgetStackItem stack)
+            {
+                continue;
+            }
+
+            int previewCount = Math.Min(StackPreviewMemberKeepCount, stack.Members.Count);
+            for (int index = 0; index < previewCount; index++)
+            {
+                displayed.Add(stack.Members[index]);
+            }
+        }
+
+        return displayed;
+    }
+
+    /// <summary>
+    /// Idempotent acquisition half of the release/acquire pairing: starts a
+    /// hydration pass when icons released while nothing displayed them now
+    /// have consumers again (stack expansion folded members into the
+    /// projection, the popover opened, the window revealed, a parked member
+    /// was reused). No-op while a hydration generation is already running —
+    /// its snapshot was taken after whatever change queued this call.
+    /// </summary>
+    internal void HealReleasedItemIconsIfIdle()
+    {
+        if (_isDisposed || IsItemHydrationActive)
+        {
+            return;
+        }
+
+        foreach (WidgetItem item in HydrationUniverseItems)
+        {
+            if (item.Icon is null)
+            {
+                StartItemHydration();
+                return;
+            }
+        }
     }
 
     private void RefreshAllIcons()
@@ -555,7 +608,7 @@ public partial class WidgetViewModel
         {
             if (clearCacheBeforeLoad)
             {
-                _fileService.ClearIconCache(
+                await _fileService.ClearIconCacheAsync(
                     path,
                     _hideShortcutArrowOverlay,
                     _showImageFilesAsIcons,
@@ -643,8 +696,11 @@ public partial class WidgetViewModel
         int generation,
         CancellationToken cancellationToken)
     {
+        // Loaded flags keep this proportional: without them every
+        // generation re-read the shell link of every shortcut in the
+        // universe — the stack-projection scroll amplifier.
         var shortcuts = HydrationUniverseItems
-            .Where(item => item.IsShortcut)
+            .Where(item => item.IsShortcut && !item.IsShortcutTargetLoaded)
             .OrderBy(item => item.SortOrder)
             .ToList();
 
@@ -737,23 +793,30 @@ public partial class WidgetViewModel
         string expectedPath,
         int generation)
     {
-        if (_dispatcherQueue.HasThreadAccess)
+        void Apply()
         {
             if (CanApplyHydrationResult(item, expectedPath, generation))
             {
                 item.Icon = icon;
+                if (icon is not null)
+                {
+                    // Freshness ledger: the snapshot that requested this
+                    // extraction is still the item's current stats, so the
+                    // merge can later tell "unchanged since extraction"
+                    // from "changed out-of-band".
+                    item.HydratedIconFileSize = item.FileSize;
+                    item.HydratedIconStamp = item.LastModified;
+                }
             }
+        }
 
+        if (_dispatcherQueue.HasThreadAccess)
+        {
+            Apply();
             return;
         }
 
-        _dispatcherQueue.TryEnqueue(() =>
-        {
-            if (CanApplyHydrationResult(item, expectedPath, generation))
-            {
-                item.Icon = icon;
-            }
-        });
+        _dispatcherQueue.TryEnqueue(Apply);
     }
 
     private void SetFolderItemCount(WidgetItem item, int count, string expectedPath, int generation)
@@ -790,6 +853,12 @@ public partial class WidgetViewModel
             if (CanApplyHydrationResult(item, expectedPath, generation))
             {
                 item.TargetPath = targetPath;
+                if (!string.IsNullOrEmpty(targetPath))
+                {
+                    // An empty read is a failed read: leave it unloaded so
+                    // a later generation retries.
+                    item.IsShortcutTargetLoaded = true;
+                }
             }
         }
 
@@ -879,11 +948,17 @@ public partial class WidgetViewModel
 
         foreach (var item in Items.Where(item => item.IsShortcut))
         {
-            item.Icon = await _fileService.GetIconAsync(
+            var refreshedIcon = await _fileService.GetIconAsync(
                 item.Path,
                 _hideShortcutArrowOverlay,
                 _showImageFilesAsIcons,
                 _iconDecodePixelWidth);
+            item.Icon = refreshedIcon;
+            if (refreshedIcon is not null)
+            {
+                item.HydratedIconFileSize = item.FileSize;
+                item.HydratedIconStamp = item.LastModified;
+            }
         }
     }
 

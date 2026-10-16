@@ -100,6 +100,27 @@ public sealed partial class FileService
         ShellTransferOutcome outcome;
         try
         {
+#if DESKBOX_NATIVE_AOT && DESKBOX_AOT_SMOKE_HARNESS
+            if (AotShellMoveFixture.TryCaptureModernTransfer(
+                    operations.Select(operation => new FileTransferPlan(
+                        operation.SourcePath,
+                        operation.DestinationPath)).ToArray(),
+                    ownerWindowHandle,
+                    out bool proceedWithRealEngine))
+            {
+                if (!proceedWithRealEngine)
+                {
+                    // Simulated persistence modes (partial / cancel /
+                    // watchdog-abandoned-but-completed) surface through the
+                    // engine's own typed outcomes; the catches below give
+                    // them the same progress phases as real failures.
+                    AotShellMoveFixture.ThrowSimulatedModernOutcome(
+                        operations.Select(operation => new FileTransferPlan(
+                            operation.SourcePath,
+                            operation.DestinationPath)).ToArray());
+                }
+            }
+#endif
             outcome = await RunShellTransferOnStaThreadAsync(
                 operations,
                 move,
@@ -190,6 +211,13 @@ public sealed partial class FileService
             FileTransferPhase.Completed,
             operations.Count,
             completedResults.Count));
+#if DESKBOX_NATIVE_AOT && DESKBOX_AOT_SMOKE_HARNESS
+        AotShellMoveFixture.RecordModernRealCompletion(
+            operations.Select(operation => new FileTransferPlan(
+                operation.SourcePath,
+                operation.DestinationPath)).ToArray(),
+            completedResults.Count);
+#endif
         return completedResults;
     }
 
@@ -368,6 +396,13 @@ public sealed partial class FileService
             // Staging is progress too: slow Shell item creation (network
             // paths, offline shells) must keep the watchdog calm.
             watchdog.Pulse();
+            // Deliberately no FOF_ALLOWUNDO / FOFX_ADDUNDORECORD here
+            // (decision 2026-10-13): DeskBox owns undo through its own
+            // receipts and history entries. Adding shell undo records would
+            // let Explorer's Ctrl+Z race the in-app undo and diverge state.
+            // FOF_ALLOWUNDO stays reserved for the delete-to-recycle-bin
+            // channel, where it means "recycle" rather than "undo record".
+            // Pinned by ShellDialogDelegationContractTests.
             ThrowForShellHResult(
                 fileOperation.SetOperationFlags(
                     ShellFileOperationNoConfirmMakeDirectory |

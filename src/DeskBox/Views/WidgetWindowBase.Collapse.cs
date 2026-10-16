@@ -4348,7 +4348,22 @@ public abstract partial class WidgetWindowBase
         // restoration here would push it to HWND_BOTTOM on collapse — below the
         // app window — while its siblings stay on top.  Detect the physical
         // Z-order instead and keep the collapse a pure visual change.
-        if (!IsPhysicallyAtDesktopBottom())
+        //
+        // A pinned group floats only through owner-band promotion residue (an
+        // activation or an Explorer-hosted launch). Hover expansion holds no
+        // interaction lease, so the group is re-bedded first; otherwise the
+        // expanded capsule rides the promoted band and floats above covering
+        // applications (#574). Dynamic mode keeps the float-preserving paths.
+        if (!IsPhysicallyAtDesktopBottom() &&
+            WidgetLayerService.UsesDesktopPinnedMode() &&
+            App.Current.WidgetManager?.TryRebedDesktopPinnedGroupBeforeExpand(
+                HWnd,
+                "expanded-state-floating-rebed") == true &&
+            IsPhysicallyAtDesktopBottom())
+        {
+            // Re-bedded: fall through to the bedded expand path below.
+        }
+        else if (!IsPhysicallyAtDesktopBottom())
         {
             // A native hover-recovery probe can expand the exposed part of a
             // capsule while another application is still foreground. Raising

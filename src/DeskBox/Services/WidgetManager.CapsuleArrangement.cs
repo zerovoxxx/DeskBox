@@ -125,7 +125,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue.TryEnqueue(() => ApplyCapsuleArrangementIfChanged(force));
+            UiDispatch.RunOrDefer(() => ApplyCapsuleArrangementIfChanged(force));
             return;
         }
 

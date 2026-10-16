@@ -711,6 +711,125 @@ public sealed class DesktopOrganizationTests : IDisposable
     }
 
     [Fact]
+    public async Task EnabledRulesSurviveRestartOnTheAdoptedLayoutStore()
+    {
+        // Steady state after the device-layer split: settings.json holds the
+        // rules but no widgets (the writer strips layout keys once the
+        // layout file is authoritative). The organizer normalize must judge
+        // rule targets only against the merged widget list — running it
+        // before the layout merge treated every enabled rule's target as
+        // deleted and disabled the rule plus the master switch on every
+        // boot (feedback #553 family). This pin doubles as the load-order
+        // pin: moving the organizer normalize back ahead of the merge turns
+        // the second boot's assertions red.
+        string mappedFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "restart-rule")).FullName;
+        string settingsDir = Path.Combine(_root, "restart-settings");
+
+        var first = new SettingsService(settingsDir);
+        await first.LoadAsync();
+        WidgetConfig widget = CreateWidget("Documents", mappedFolder);
+        first.Settings.Widgets.Add(widget);
+        first.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        first.Settings.DesktopAutoOrganizationEnabled = true;
+        await first.SaveAsync();
+
+        // Second boot reads the stripped settings.json plus the
+        // authoritative widget-layout.json — the state every real restart
+        // sees after adoption.
+        var second = new SettingsService(settingsDir);
+        await second.LoadAsync();
+        Assert.True(second.Settings.DesktopAutoOrganizationEnabled);
+        Assert.Single(second.Settings.DesktopOrganizationRules);
+        Assert.True(second.Settings.DesktopOrganizationRules[0].IsEnabled);
+
+        await second.SaveAsync();
+        Assert.True(second.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(second.Settings.DesktopOrganizationRules[0].IsEnabled);
+    }
+
+    [Fact]
+    public async Task EnabledRulesSurviveFirstBootFromLegacySettings()
+    {
+        // The upgrade-path shape: settings.json still carries the legacy
+        // widgets key (no widget-layout.json yet — adoption happens during
+        // this very load). The organizer normalize must judge the rules
+        // against the adopted list and keep them enabled; the pre-merge
+        // widget list is exactly what the legacy key provides, so this pin
+        // guards the DefaultMissing adoption branch of the merged normalize.
+        string mappedFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "legacy-first-boot")).FullName;
+        string settingsDir = Path.Combine(_root, "legacy-first-settings");
+
+        var legacy = new SettingsService(settingsDir);
+        WidgetConfig widget = CreateWidget("Documents", mappedFolder);
+        legacy.Settings.Widgets.Add(widget);
+        legacy.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        legacy.Settings.DesktopAutoOrganizationEnabled = true;
+        // Saving before any load keeps the layout keys inside settings.json
+        // (the store is not authoritative yet) — the legacy on-disk shape.
+        await legacy.SaveAsync();
+
+        var upgraded = new SettingsService(settingsDir);
+        await upgraded.LoadAsync();
+        Assert.True(upgraded.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(upgraded.Settings.DesktopOrganizationRules[0].IsEnabled);
+    }
+
+    [Fact]
+    public async Task EnabledRulesSurviveSessionWithCorruptLayoutStore()
+    {
+        // The untrusted-topology branch: settings.json is stripped (rules
+        // only) and BOTH layout files are corrupt. The load falls to
+        // DefaultAfterFailure, the merged flag stays false, and neither the
+        // load-time nor the save-time organizer normalize may disable rules
+        // against the untrusted (empty) widget list.
+        string mappedFolder = Directory.CreateDirectory(
+            Path.Combine(_root, "corrupt-layout")).FullName;
+        string settingsDir = Path.Combine(_root, "corrupt-layout-settings");
+
+        var first = new SettingsService(settingsDir);
+        await first.LoadAsync();
+        WidgetConfig widget = CreateWidget("Documents", mappedFolder);
+        first.Settings.Widgets.Add(widget);
+        first.Settings.DesktopOrganizationRules.Add(new DesktopOrganizationRule
+        {
+            TargetWidgetId = widget.Id,
+            CategoryIds = [DesktopOrganizationCategoryIds.Documents]
+        });
+        first.Settings.DesktopAutoOrganizationEnabled = true;
+        await first.SaveAsync();
+
+        // Corrupt the durable pair so the second boot cannot recover it.
+        string layoutPath = Path.Combine(settingsDir, "widget-layout.json");
+        string backupPath = layoutPath + ".bak";
+        Assert.True(File.Exists(layoutPath));
+        await File.WriteAllTextAsync(layoutPath, "{ not json");
+        if (File.Exists(backupPath))
+        {
+            await File.WriteAllTextAsync(backupPath, "{ not json");
+        }
+
+        var second = new SettingsService(settingsDir);
+        await second.LoadAsync();
+        Assert.True(second.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(second.Settings.DesktopOrganizationRules[0].IsEnabled);
+
+        // Saves inside the untrusted session must keep the rules too.
+        await second.SaveAsync();
+        Assert.True(second.Settings.DesktopAutoOrganizationEnabled);
+        Assert.True(second.Settings.DesktopOrganizationRules[0].IsEnabled);
+    }
+
+    [Fact]
     public async Task Settings_ClosesAutoOrganizationAndKeepsBaselineWhenLastTargetIsDeleted()
     {
         // A truly deleted target (widget in DeletedWidgetIds) remains the only

@@ -5,7 +5,6 @@ using DeskBox.Controls.WidgetContents;
 using DeskBox.Platform;
 using DeskBox.ViewModels;
 using DeskBox.Views;
-using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 
@@ -263,21 +262,18 @@ public sealed partial class WidgetManager
         bool forceScheduleWhenHidden = false,
         bool? observedNativeVisibility = null)
     {
+        if (App.IsShuttingDown)
+        {
+            return;
+        }
+
         if (!HasUiThreadAccess())
         {
-            DispatcherQueue? dispatcherQueue = App.UiDispatcherQueue;
-            bool enqueued = dispatcherQueue?.TryEnqueue(() =>
+            UiDispatch.RunOrDefer(() =>
                 ReconcileBackgroundMemoryCleanupForWidgetVisibility(
                     reason,
                     forceScheduleWhenHidden,
-                    observedNativeVisibility)) == true;
-            if (!enqueued)
-            {
-                App.Log(
-                    $"[Memory] Widget visibility reconciliation failed " +
-                    $"reason={reason} error=dispatcher-unavailable");
-            }
-
+                    observedNativeVisibility));
             return;
         }
 
@@ -724,8 +720,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue?.TryEnqueue(
-                ApplyPerformanceSettingsIfChanged);
+            UiDispatch.RunOrDefer(ApplyPerformanceSettingsIfChanged);
             return;
         }
 
@@ -777,7 +772,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue.TryEnqueue(() => RefreshVisibleWidgetDesktopLayers(reason));
+            UiDispatch.RunOrDefer(() => RefreshVisibleWidgetDesktopLayers(reason));
             return;
         }
 
@@ -2600,7 +2595,7 @@ public sealed partial class WidgetManager
 
         if (_fileWidgets.TryGetValue(widgetId, out var fileEntry))
         {
-            await fileEntry.ViewModel.RefreshFromConfigAsync();
+            await fileEntry.ViewModel.RefreshFromConfigAsync(clearIconCacheBeforeHydration: false);
             return;
         }
 
@@ -2611,7 +2606,7 @@ public sealed partial class WidgetManager
                 string.Equals(surface.WidgetId, widgetId, StringComparison.Ordinal));
         if (contentWindow?.CurrentContent is FileWidgetContentAdapter fileSurface)
         {
-            await fileSurface.ViewModel.RefreshFromConfigAsync();
+            await fileSurface.ViewModel.RefreshFromConfigAsync(clearIconCacheBeforeHydration: false);
         }
     }
 
@@ -2621,7 +2616,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue?.TryEnqueue(() =>
+            UiDispatch.RunOrDefer(() =>
                 SetDesktopOrganizationBusy(widgetIds.ToArray(), isBusy));
             return;
         }

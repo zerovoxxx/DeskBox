@@ -98,7 +98,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue.TryEnqueue(
+            UiDispatch.RunOrDefer(
                 () => BringAuxiliaryWindowToFront(windowHandle, reason));
             return;
         }
@@ -128,7 +128,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue.TryEnqueue(
+            UiDispatch.RunOrDefer(
                 () => ReleaseRaisedBandGuest(windowHandle, reason));
             return;
         }
@@ -357,7 +357,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue.TryEnqueue(
+            UiDispatch.RunOrDefer(
                 () => QueueIdleWidgetZOrderNormalization(reason, delay, cohesionExit));
             return;
         }
@@ -481,6 +481,86 @@ public sealed partial class WidgetManager
             await Task.Delay(delay);
             VerifyDesktopPinnedBedding(reason, requireConfirmation: false);
         });
+    }
+
+    /// <summary>
+    /// One-shot re-bed for a pinned group that is floating above a foreign
+    /// window when a capsule is about to expand. Hover expansion holds no
+    /// interaction lease, so unlike the watchdog this repairs immediately:
+    /// letting the expanded capsule ride a promoted owner band floats it
+    /// above covering applications (#574).
+    /// </summary>
+    internal bool TryRebedDesktopPinnedGroupBeforeExpand(
+        IntPtr windowHandle,
+        string reason)
+    {
+        if (!HasUiThreadAccess() ||
+            !WidgetLayerService.UsesDesktopPinnedMode() ||
+            windowHandle == IntPtr.Zero ||
+            _widgetsRaisedFromTray ||
+            _isTogglingWidgetsDesktopLayer ||
+            _sessionManager.IsInteractionActive ||
+            HasActiveExpandedWidgetLayerLease())
+        {
+            return false;
+        }
+
+        IntPtr witness = WidgetLayerService.FindForeignWindowBelow(windowHandle);
+        if (witness == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        RebedDesktopPinnedWidgetGroup(reason, witness);
+        return true;
+    }
+
+    /// <summary>
+    /// Re-beds every visible pinned widget except the activating one in the
+    /// same activation cycle. Activating a DefView-owned HWND promotes the
+    /// whole owner band above application windows, so without this the
+    /// siblings linger above covering apps until the next idle normalization
+    /// and read as the whole group flashing to the front (#574). Bedded
+    /// siblings short-circuit inside the attach path, so the steady state
+    /// costs no z-order transactions. The expanded-capsule lease owner is
+    /// exempt as well: it legitimately owns the top of the widget band until
+    /// it collapses, and bedding it would bury it beneath sibling widgets.
+    /// </summary>
+    internal void RebedPinnedSiblingsAfterActivation(
+        IntPtr activeWindowHandle,
+        string reason)
+    {
+        if (!HasUiThreadAccess() ||
+            !WidgetLayerService.UsesDesktopPinnedMode())
+        {
+            return;
+        }
+
+        IntPtr expandedOwnerHandle =
+            HasActiveExpandedWidgetLayerLease()
+                ? _expandedWidgetLayerLease.WindowHandle
+                : IntPtr.Zero;
+
+        List<IntPtr> siblings = GetLoadedDesktopWindows()
+            .Where(window =>
+                window.Visible &&
+                window.WindowHandle != IntPtr.Zero &&
+                window.WindowHandle != activeWindowHandle &&
+                window.WindowHandle != expandedOwnerHandle)
+            .Select(window => window.WindowHandle)
+            .ToList();
+        if (siblings.Count == 0)
+        {
+            return;
+        }
+
+        bool applied = WidgetLayerService.RestoreGroupPreservingForeground(
+            siblings,
+            reason);
+        App.LogVerbose(
+            $"[ZOrder] Pinned siblings re-bedded after activation " +
+            $"reason={reason} count={siblings.Count} applied={applied} " +
+            $"expandedOwnerExcluded=0x{expandedOwnerHandle.ToInt64():X}");
     }
 
     private void VerifyDesktopPinnedBedding(string reason, bool requireConfirmation)
@@ -610,7 +690,7 @@ public sealed partial class WidgetManager
     {
         if (!HasUiThreadAccess())
         {
-            App.UiDispatcherQueue.TryEnqueue(
+            UiDispatch.RunOrDefer(
                 () => RestoreTemporarilyRaisedWidgetsToDesktopLayer(reason));
             return;
         }
@@ -1365,7 +1445,10 @@ public sealed partial class WidgetManager
         return IsTaskbarWindow(rootWindow);
     }
 
-    private static bool IsTaskbarWindow(IntPtr hWnd)
+    // Internal so WidgetLayerService's foreign-window walks share one taskbar
+    // classification (tray, secondary taskbars, and the NotifyIcon overflow
+    // popup are all neutral, never "foreign app windows").
+    internal static bool IsTaskbarWindow(IntPtr hWnd)
     {
         return WindowOrAncestorHasClass(
             hWnd,

@@ -175,8 +175,12 @@ public sealed class WicBuiltInThumbnailDecoderContractTests
             "WicBuiltInThumbnailDecoder.Invalidate(path)",
             iconHelper,
             StringComparison.Ordinal);
+        // Per-path invalidation, the full hidden cleanup, and (since the
+        // icon freshness ledger, 2026-10-13) the recovery refreshes' global
+        // retry-state reset — all three share the fallback's failure
+        // lifecycle.
         Assert.Equal(
-            2,
+            3,
             CountOccurrences(
                 iconHelper,
                 "WicBuiltInThumbnailDecoder.ClearTransientFailures()"));

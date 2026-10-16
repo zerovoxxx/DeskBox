@@ -420,9 +420,12 @@ public static class WidgetLayerService
     /// </summary>
     public static bool TryBringAbovePeerWidgetsAtDesktopLayer(IntPtr windowHandle)
     {
-        // Desktop-pinned widgets are owner-attached to Explorer's desktop icon
-        // layer, so HWND_TOP lifts them above sibling widgets only; the band
-        // itself stays beneath every application window and Win+D.
+        // Ownership of SHELLDLL_DefView only enforces a minimum position
+        // (above the owner); it never confines the window to the owner band.
+        // HWND_TOP therefore reaches the top of the whole normal band — above
+        // every application — so the expanded capsule is instead inserted
+        // directly below the nearest visible foreign window above the group:
+        // above sibling widgets, beneath every application (#574).
         if (!ShouldAttachRestingWindowToDesktop() ||
             !TryAttachToDesktopIconLayer(windowHandle, placeAtBottom: false))
         {
@@ -431,7 +434,7 @@ public static class WidgetLayerService
 
         return Win32Helper.SetWindowPos(
             windowHandle,
-            Win32Helper.HWND_TOP,
+            FindInsertBelowAnchorForDesktopLayerRaise(windowHandle),
             0,
             0,
             0,
@@ -441,6 +444,36 @@ public static class WidgetLayerService
                 Win32Helper.SWP_NOACTIVATE |
                 Win32Helper.SWP_NOOWNERZORDER |
                 Win32Helper.SWP_SHOWWINDOW);
+    }
+
+    /// <summary>
+    /// Resolves the z-order ceiling for a desktop-layer peer raise: the
+    /// nearest visible foreign window above the widget's group. The returned
+    /// handle is used as the SetWindowPos insert-after anchor, so the raised
+    /// widget lands directly below it. When no foreign window sits above the
+    /// group, HWND_TOP is equivalent because nothing can be jumped over.
+    /// DeskBox-owned surfaces, shell desktop windows, and invisible windows
+    /// do not constrain the ceiling.
+    /// </summary>
+    private static IntPtr FindInsertBelowAnchorForDesktopLayerRaise(
+        IntPtr windowHandle)
+    {
+        const int wsMinimizeStyle = 0x20000000;
+        IntPtr current = Win32Helper.GetWindow(windowHandle, Win32Helper.GW_HWNDPREV);
+        int visited = 0;
+        while (current != IntPtr.Zero && visited++ < MaxBeddingWalkWindows)
+        {
+            if (ClassifyWindowForBedding(current, wsMinimizeStyle) ==
+                    DesktopLayerBeddingWindowKind.ForeignAppWindow &&
+                !WidgetManager.IsTaskbarWindow(current))
+            {
+                return current;
+            }
+
+            current = Win32Helper.GetWindow(current, Win32Helper.GW_HWNDPREV);
+        }
+
+        return Win32Helper.HWND_TOP;
     }
 
     /// <summary>
@@ -906,7 +939,11 @@ public static class WidgetLayerService
     /// Determines whether a pointer press must leave the current foreground
     /// application active. Desktop-pinned widgets behave like desktop content:
     /// an exposed part can still receive the mouse message, but it must not
-    /// activate and jump above another application. Dynamic mode keeps the
+    /// activate and jump above another application. Suppression applies both
+    /// when a foreign application owns the foreground and when the widget is
+    /// geometrically covered by a foreign window — activating a DefView-owned
+    /// HWND promotes the whole owner band above such windows even while the
+    /// desktop shell owns the foreground (#574). Dynamic mode keeps the
     /// existing interactive raise behavior.
     /// </summary>
     public static bool ShouldSuppressPointerActivation(IntPtr windowHandle)
@@ -923,7 +960,8 @@ public static class WidgetLayerService
             UsesDesktopPinnedMode(),
             hasForeground,
             hasForeground && IsDesktopShellWindow(foregroundRoot),
-            foregroundIsWidget);
+            foregroundIsWidget,
+            IsWindowCoveredByForeignWindow(windowHandle));
     }
 
     /// <summary>
@@ -1202,6 +1240,58 @@ public static class WidgetLayerService
         return IntPtr.Zero;
     }
 
+    /// <summary>
+    /// Reports whether a visible foreign application window both sits above
+    /// the widget in Z order and geometrically overlaps it. Activating a
+    /// DefView-owned HWND promotes the whole owner band above every such
+    /// window (#454/#574), so pointer clicks on an overlapped pinned widget
+    /// must not activate even when the desktop shell owns the foreground; a
+    /// fully exposed widget may still activate so keyboard flows (rename,
+    /// text entry, file shortcuts) keep working. Promotion over a
+    /// non-overlapping window is visually invisible, so only intersecting
+    /// windows count. The taskbar is neutral: an auto-hide taskbar overlaps
+    /// widgets without an activation being able to disturb it.
+    /// </summary>
+    public static bool IsWindowCoveredByForeignWindow(IntPtr windowHandle)
+    {
+        if (windowHandle == IntPtr.Zero || !Win32Helper.IsWindow(windowHandle))
+        {
+            return false;
+        }
+
+        if (!Win32Helper.GetWindowRect(windowHandle, out Win32Helper.RECT widgetRect))
+        {
+            return false;
+        }
+
+        const int wsMinimizeStyle = 0x20000000;
+        IntPtr current = Win32Helper.GetWindow(windowHandle, Win32Helper.GW_HWNDPREV);
+        int visited = 0;
+        while (current != IntPtr.Zero && visited++ < MaxBeddingWalkWindows)
+        {
+            if (ClassifyWindowForBedding(current, wsMinimizeStyle) ==
+                    DesktopLayerBeddingWindowKind.ForeignAppWindow &&
+                !WidgetManager.IsTaskbarWindow(current) &&
+                Win32Helper.GetWindowRect(current, out Win32Helper.RECT coverRect) &&
+                RectsIntersect(widgetRect, coverRect))
+            {
+                return true;
+            }
+
+            current = Win32Helper.GetWindow(current, Win32Helper.GW_HWNDPREV);
+        }
+
+        return false;
+    }
+
+    private static bool RectsIntersect(Win32Helper.RECT first, Win32Helper.RECT second)
+    {
+        return first.Left < second.Right &&
+            second.Left < first.Right &&
+            first.Top < second.Bottom &&
+            second.Top < first.Bottom;
+    }
+
     // The walk terminates at Progman after a handful of windows in a healthy
     // session; the cap only guards against a pathological cycle.
     private const int MaxBeddingWalkWindows = 256;
@@ -1423,12 +1513,14 @@ internal static class WidgetLayerPointerActivationPolicy
         bool usesDesktopPinnedMode,
         bool hasForegroundWindow,
         bool foregroundIsDesktopShell,
-        bool foregroundIsWidget)
+        bool foregroundIsWidget,
+        bool coveredByForeignWindow)
     {
         return usesDesktopPinnedMode &&
-            hasForegroundWindow &&
-            !foregroundIsDesktopShell &&
-            !foregroundIsWidget;
+            (coveredByForeignWindow ||
+                (hasForegroundWindow &&
+                    !foregroundIsDesktopShell &&
+                    !foregroundIsWidget));
     }
 
     public static bool ShouldPreserveActivatingClick(

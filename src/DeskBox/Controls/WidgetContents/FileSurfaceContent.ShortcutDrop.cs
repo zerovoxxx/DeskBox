@@ -204,7 +204,7 @@ public sealed partial class FileSurfaceContent
         if (created > 0 &&
             !string.IsNullOrWhiteSpace(ViewModel.MappedFolderPath))
         {
-            await ViewModel.RefreshFromConfigAsync();
+            await ViewModel.RefreshFromConfigAsync(clearIconCacheBeforeHydration: false);
         }
 
         return created;
@@ -289,7 +289,7 @@ public sealed partial class FileSurfaceContent
         if (created.Count > 0 &&
             !string.IsNullOrWhiteSpace(ViewModel.MappedFolderPath))
         {
-            await ViewModel.RefreshFromConfigAsync();
+            await ViewModel.RefreshFromConfigAsync(clearIconCacheBeforeHydration: false);
         }
 
         return created;

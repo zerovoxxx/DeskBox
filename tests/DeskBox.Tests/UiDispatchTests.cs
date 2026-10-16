@@ -144,17 +144,45 @@ public sealed class UiDispatchTests : IDisposable
     }
 
     [Fact]
-    public void Shutdown_DropsPending_RefusesNewWork()
+    public async Task Shutdown_KeepsUiThreadIdentity_ButRefusesNewWork()
     {
         UiDispatch.MarkUiOriginThread();
         UiDispatch.MarkShutdown();
 
         Assert.Equal(UiDispatch.PhaseKind.Shutdown, UiDispatch.Phase);
-        Assert.False(UiDispatch.HasAccess);
+        Assert.True(UiDispatch.HasAccess);
+        Assert.False(await Task.Run(() => UiDispatch.HasAccess));
 
         bool ran = false;
         UiDispatch.RunOrDefer(() => ran = true);
         Assert.False(ran);
+        await Assert.ThrowsAsync<TaskCanceledException>(
+            () => UiDispatch.RunAsync(() => Task.FromResult(1)));
+    }
+
+    [Fact]
+    public async Task Shutdown_OnReadyDispatcherThread_KeepsIdentity_ButDropsWork()
+    {
+        if (!s_realDispatcherQueueAvailable)
+        {
+            return;
+        }
+
+        using var dispatcher = new DispatcherQueueThread();
+        bool accessAfterShutdown = false;
+        bool ranAfterShutdown = false;
+        await dispatcher.RunOnQueueAsync(() =>
+        {
+            UiDispatch.MarkUiOriginThread();
+            UiDispatch.MarkReady(dispatcher.Queue);
+            UiDispatch.MarkShutdown();
+            accessAfterShutdown = UiDispatch.HasAccess;
+            UiDispatch.RunOrDefer(() => ranAfterShutdown = true);
+        });
+
+        Assert.True(accessAfterShutdown);
+        Assert.False(ranAfterShutdown);
+        Assert.False(await Task.Run(() => UiDispatch.HasAccess));
     }
 
     [Fact]

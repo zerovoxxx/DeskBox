@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml.Controls;
 
 namespace DeskBox.Views;
@@ -47,6 +48,14 @@ public sealed partial class SettingsWindow
                 // Another dialog is showing on this XamlRoot (also the
                 // documented failure for a dialog without a root if the
                 // window closed mid-build); wait and retry.
+            }
+            catch (COMException ex) when (ex.HResult == unchecked((int)0x80000019))
+            {
+                // The same collision surfaces as COMException 0x80000019
+                // ("an async operation did not start properly" wrapping
+                // "only one ContentDialog can be open") in some projections
+                // — field log 2026-10-14 08:23 crashed an update-failure
+                // continuation through exactly this gap.
             }
         }
 

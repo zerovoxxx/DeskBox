@@ -416,6 +416,17 @@ public const int DefaultSearchMaxResults = 100;
 
     private readonly string _settingsPath;
     private AppSettings _settings = new();
+
+    /// <summary>
+    /// True once the in-memory widget list is the merged layout truth (or a
+    /// directly constructed settings graph), so the organizer normalize may
+    /// judge rule targets against it. False while a load sits between its
+    /// pre-merge normalize pass and the widget-layout merge — including the
+    /// unlocked layout-await window — and after a non-authoritative layout
+    /// failure, where the widget list is untrusted and must not drive
+    /// rule-deletion decisions.
+    /// </summary>
+    private bool _widgetLayoutMerged = true;
     // Set at load when the on-disk settings.json carries a schema version
     // from a newer build; every save is refused for the session.
     private bool _settingsSchemaNewerThanBuild;
@@ -846,7 +857,12 @@ settings.FocusClickedWidgetOnRaise = false;
                 changed |= NormalizeFeatureWidgetSettings(_settings);
                 changed |= NormalizeWidgetContentSettings(_settings);
                 changed |= NormalizeWidgetTopologyLayouts(_settings);
-                changed |= NormalizeOrganizerSettings(_settings);
+                // NormalizeOrganizerSettings deliberately does not run here:
+                // rule validity is judged against the widget list, which the
+                // device-layer split moved into widget-layout.json — merged
+                // only later in this load. It once ran here and treated every
+                // enabled rule's target as deleted, disabling the rule and
+                // the master switch on every boot (feedback #553 family).
                 changed |= NormalizeHotkeySettings(_settings);
                 changed |= NormalizeSearchSettings(_settings);
                 changed |= NormalizeQuickCaptureSettings(_settings);
@@ -854,6 +870,14 @@ settings.FocusClickedWidgetOnRaise = false;
                 changed |= NormalizeWeatherSettings(_settings);
                 changed |= NormalizeDeletionSettings(_settings);
                 changed |= DataBackupSettingsPolicy.Normalize(_settings);
+
+                // Suspend organizer normalization for the rest of the load:
+                // until the layout merge lands, the widget list is empty or
+                // legacy, and rule-deletion decisions made against it are
+                // wrong. This also covers a save racing the unlocked layout
+                // await — the write path skips the organizer normalize while
+                // this is false.
+                _widgetLayoutMerged = false;
             }
 
             // Device-layer migration: widget-layout.json either loads its own
@@ -867,6 +891,7 @@ settings.FocusClickedWidgetOnRaise = false;
             lock (_lock)
             {
                 _settings.WidgetLayout.CopyFrom(layoutResult.Data);
+                _widgetLayoutMerged = layoutResult.Authoritative;
                 if (layoutResult.Authoritative)
                 {
                     // File-won data has not seen this session's normalize
@@ -875,6 +900,14 @@ settings.FocusClickedWidgetOnRaise = false;
                     changed |= NormalizeWidgetContentSettings(_settings);
                     changed |= NormalizeFeatureWidgetSettings(_settings);
                     changed |= NormalizeWidgetTopologyLayouts(_settings);
+                    // The organizer normalize READS layout members: rule
+                    // validity is judged against this merged list, and its
+                    // ManagedFolderName backfill must precede the deletion
+                    // normalize's stale-widget pruning (an unfilled path is
+                    // a pruning condition). Skipped on the non-authoritative
+                    // failure branch on purpose: an untrusted widget list
+                    // must not make rule-deletion decisions.
+                    changed |= NormalizeOrganizerSettings(_settings);
                     changed |= NormalizeDeletionSettings(_settings);
                 }
 
@@ -912,7 +945,17 @@ settings.FocusClickedWidgetOnRaise = false;
                 // take the whole desktop down with it.
                 WidgetLayoutLoadResult layoutResult =
                     await Layout.LoadAsync(_settings.WidgetLayout);
-                lock (_lock) _settings.WidgetLayout.CopyFrom(layoutResult.Data);
+                lock (_lock)
+                {
+                    _settings.WidgetLayout.CopyFrom(layoutResult.Data);
+                    // Own the merged-flag state explicitly: a successful
+                    // recovery re-adoption trusts the file data (rules are
+                    // empty in a defaults session either way), a failed one
+                    // keeps organizer normalization suspended for the
+                    // session — an untrusted list must not make
+                    // rule-deletion decisions.
+                    _widgetLayoutMerged = layoutResult.Authoritative;
+                }
             }
             catch (Exception layoutEx) when (layoutEx is not OperationCanceledException)
             {
@@ -1021,8 +1064,16 @@ settings.FocusClickedWidgetOnRaise = false;
             bool layoutSaved = true;
             bool layoutCommitted = false;
             string layoutFailureReason = "widget-layout.json commit failed";
-            if (Layout.IsAuthoritative)
+            if (Layout.IsAuthoritative && _widgetLayoutMerged)
             {
+                // _widgetLayoutMerged, not just IsAuthoritative: the store
+                // flips IsAuthoritative inside its own load, before the
+                // merge lock copies the file data into _settings. A save in
+                // that sub-window would otherwise commit the pre-merge
+                // slice — in the steady state an EMPTY layout — over the
+                // durable widget-layout.json. No writer can reach this
+                // window today (settings-load precedes every saver); the
+                // flag makes that structural instead of incidental.
                 if (Layout.CanWrite)
                 {
                     layoutSaved = await Layout.SaveCheckedAsync(WriteLayoutTempFileAsync);
@@ -1041,7 +1092,7 @@ settings.FocusClickedWidgetOnRaise = false;
             // Fail-closed: when the layout commit failed, the layout slice
             // exists only in memory — the settings file must keep carrying
             // the keys so the data survives to the next successful save.
-            bool stripLayoutKeys = Layout.IsAuthoritative && layoutSaved;
+            bool stripLayoutKeys = Layout.IsAuthoritative && _widgetLayoutMerged && layoutSaved;
             try
             {
                 await ResilientJsonStore.SaveAsync(
@@ -1151,7 +1202,14 @@ settings.FocusClickedWidgetOnRaise = false;
             NormalizeFeatureWidgetSettings(_settings);
             NormalizeWidgetContentSettings(_settings);
             NormalizeWidgetTopologyLayouts(_settings);
-            NormalizeOrganizerSettings(_settings);
+            if (_widgetLayoutMerged)
+            {
+                // The organizer normalize may only run against the merged
+                // widget topology; during the load's layout-await window the
+                // list is empty or legacy and the normalize would disable
+                // every enabled rule as a deleted target.
+                NormalizeOrganizerSettings(_settings);
+            }
             NormalizeHotkeySettings(_settings);
             NormalizeSearchSettings(_settings);
             NormalizeQuickCaptureSettings(_settings);
@@ -2829,11 +2887,11 @@ settings.FocusClickedWidgetOnRaise = false;
             changed = true;
         }
         settings.DesktopOrganizationRules = normalizedDesktopRules;
-        // A pending rule still counts as effective for the master switch:
-        // normalize also runs at load time, before widget hydration backfills
-        // MappedFolderPath, and closing the switch there would disable the
-        // feature on every boot (the runtime resolver skips such rules until
-        // the target becomes usable again).
+        // Effective means an enabled rule targeting a live widget with at
+        // least one matcher. The organizer normalize runs after the
+        // widget-layout merge, so "live" reflects the real widget list; a
+        // target that exists but is not yet usable keeps the switch on (the
+        // runtime resolver skips such rules until the target recovers).
         bool hasEffectiveDesktopOrganizationRule = normalizedDesktopRules.Any(rule =>
             rule.IsEnabled &&
             liveWidgetIds.Contains(rule.TargetWidgetId) &&

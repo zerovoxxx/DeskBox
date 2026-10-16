@@ -768,6 +768,20 @@ public static class IconHelper
     }
 
     /// <summary>
+    /// Clears only the retry-state markers (timeout blacklists), keeping
+    /// every decoded entry. Recovery refreshes call this so previously
+    /// timed-out sources get a fresh attempt without the visual cost of the
+    /// blanket icon clear the freshness ledger retired.
+    /// </summary>
+    internal static void ResetTransientFailures()
+    {
+        s_iconSourceTimeouts.Clear();
+        s_iconBytesTimeouts.Clear();
+        ShellThumbnailProxy.ClearTransientFailures();
+        WicBuiltInThumbnailDecoder.ClearTransientFailures();
+    }
+
+    /// <summary>
     /// Trims only completed, cold recreatable image entries beyond a half-sized
     /// warm LRU. Recently used and in-flight entries stay cached so showing a
     /// widget again does not turn into a burst of disk, Shell, and decode work.
@@ -1763,7 +1777,18 @@ public static class IconHelper
         }
     }
 
-    private static Task<BitmapImage?> CreateBitmapImageAsync(
+    /// <summary>
+    /// Menu-sized indexed icon as PNG bytes, extracted in-process
+    /// (SHDefExtractIcon); safe to call from background threads. Used for
+    /// Open With app entries, where the extraction starts when the menu is
+    /// built so the icons are ready by the time the submenu opens on hover.
+    /// </summary>
+    internal static byte[]? GetIndexedIconPngBytes(
+        string filePath,
+        int iconIndex,
+        int size) => TryExtractHighResIndexedIcon(filePath, iconIndex, size);
+
+    internal static Task<BitmapImage?> CreateBitmapImageAsync(
         Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
         byte[]? bytes,
         int decodePixelWidth = 0)

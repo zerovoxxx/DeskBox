@@ -37,6 +37,7 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
     private CancellationTokenSource _featureCts = new();
     private Task? _retryPump;
     private bool _lastEnabled;
+    private bool _started;
     private bool _disposed;
     private int _watcherRecoveryScheduled;
     private int _watcherRecoveryAttempts;
@@ -103,6 +104,9 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
         ThrowIfDisposed();
         _retryPump ??= RetryPumpAsync(_lifetimeCts.Token);
         _lastEnabled = _settingsService.Settings.DesktopAutoOrganizationEnabled;
+        // Both exits below are "started": the disabled branch must also adopt
+        // later settings toggles, so the flag is set before either return.
+        _started = true;
         if (!_lastEnabled)
         {
             _featureCts.Cancel();
@@ -129,6 +133,15 @@ public sealed class DesktopAutoOrganizationWatcher : IDisposable
 
     private void OnSettingsChanged()
     {
+        // Settings toggles must not bypass the deferred start: before Start()
+        // has run the watcher is deliberately idle (startup storm guard), and
+        // _lastEnabled still holds its pre-start default. Start() adopts the
+        // current setting when it runs.
+        if (!_started)
+        {
+            return;
+        }
+
         bool enabled = _settingsService.Settings.DesktopAutoOrganizationEnabled;
         if (!enabled && _lastEnabled)
         {

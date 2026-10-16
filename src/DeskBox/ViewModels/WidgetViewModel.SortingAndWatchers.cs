@@ -83,6 +83,105 @@ public partial class WidgetViewModel
     }
 
     /// <summary>
+    /// Block-aware multi-selection variant of <see cref="MoveItemForReorder"/>.
+    /// The dragged items keep their relative order and land as one contiguous
+    /// block. The block is applied through sequential collection moves rather
+    /// than a remove/insert rebuild, which preserves the ListView selection
+    /// across the reorder.
+    /// </summary>
+    public bool MoveItemsForReorder(
+        IReadOnlyList<WidgetItem> draggedItems,
+        int targetIndex)
+    {
+        if (Config.SortMode != WidgetSortMode.Manual ||
+            draggedItems.Count == 0)
+        {
+            return false;
+        }
+
+        if (draggedItems.Count == 1)
+        {
+            return MoveItemForReorder(
+                draggedItems[0],
+                targetIndex);
+        }
+
+        if (!TryComputeItemBlockReorder(
+                Items,
+                draggedItems,
+                targetIndex,
+                out int insertionIndex))
+        {
+            return false;
+        }
+
+        HashSet<WidgetItem> draggedSet = new(
+            draggedItems,
+            ReferenceEqualityComparer.Instance);
+        foreach (WidgetItem item in Items
+                     .Where(draggedSet.Contains)
+                     .ToList())
+        {
+            int currentIndex = IndexOfReference(Items, item, 0);
+            if (currentIndex >= 0 && currentIndex != insertionIndex)
+            {
+                Items.Move(currentIndex, insertionIndex);
+            }
+
+            insertionIndex++;
+        }
+
+        return true;
+    }
+
+    // Computes where a contiguous block move lands: the insertion index
+    // counts how many dragged items already sit ahead of the drop target, so
+    // removing them from their old positions cannot shift the landing spot.
+    // Returns false for an equivalent drop that would not change the order.
+    internal static bool TryComputeItemBlockReorder(
+        IReadOnlyList<WidgetItem> items,
+        IReadOnlyList<WidgetItem> draggedItems,
+        int targetIndex,
+        out int insertionIndex)
+    {
+        insertionIndex = -1;
+        HashSet<WidgetItem> draggedSet = new(
+            draggedItems,
+            ReferenceEqualityComparer.Instance);
+        List<int> draggedIndices = new(draggedSet.Count);
+        for (int index = 0; index < items.Count; index++)
+        {
+            if (draggedSet.Contains(items[index]))
+            {
+                draggedIndices.Add(index);
+            }
+        }
+
+        if (draggedIndices.Count == 0)
+        {
+            return false;
+        }
+
+        int cappedIndex = Math.Clamp(targetIndex, 0, items.Count);
+        int movingBeforeInsertion = draggedIndices
+            .Count(index => index < cappedIndex);
+        insertionIndex = Math.Clamp(
+            cappedIndex - movingBeforeInsertion,
+            0,
+            items.Count - draggedIndices.Count);
+
+        for (int offset = 0; offset < draggedIndices.Count; offset++)
+        {
+            if (draggedIndices[offset] != insertionIndex + offset)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Persists the current item order to config and settings.
     /// Called once after real-time reordering is complete (on drop).
     /// </summary>
@@ -768,6 +867,73 @@ public partial class WidgetViewModel
         }
     }
 
+    /// <summary>
+    /// Pure shortcut-target freshness decision shared with behavior tests:
+    /// refresh snapshots never read shortcut targets, so a stored target
+    /// only goes stale when the .lnk itself changed (icon-ledger mismatch).
+    /// An unstamped ledger (-1, extraction never succeeded) means "no
+    /// information" and preserves the stored target.
+    /// </summary>
+    internal static bool ShouldDropStaleHydratedShortcutTarget(
+        bool targetIsShortcut,
+        long targetHydratedIconFileSize,
+        DateTime targetHydratedIconStamp,
+        bool sourceIsShortcut,
+        long sourceFileSize,
+        DateTime sourceLastModified)
+    {
+        return targetIsShortcut &&
+               sourceIsShortcut &&
+               targetHydratedIconFileSize >= 0 &&
+               (targetHydratedIconFileSize != sourceFileSize ||
+                targetHydratedIconStamp != sourceLastModified);
+    }
+
+    /// <summary>
+    /// Pure icon-ledger decision shared with behavior tests: an icon
+    /// reference is stale when the file's size or timestamp moved since
+    /// extraction. This is the invalidation point that replaces
+    /// lifecycle-triggered blanket icon clears: the merge drops exactly the
+    /// changed items, the content-versioned cache key self-heals on the
+    /// re-fetch, and unchanged items keep their icons untouched.
+    /// </summary>
+    internal static bool ShouldDropStaleHydratedIcon(
+        bool hasIcon,
+        long hydratedFileSize,
+        DateTime hydratedStamp,
+        long sourceFileSize,
+        DateTime sourceStamp)
+    {
+        return hasIcon &&
+               (hydratedFileSize != sourceFileSize ||
+                hydratedStamp != sourceStamp);
+    }
+
+    /// <summary>
+    /// Pure folder-count freshness decision shared with behavior tests.
+    /// Refresh snapshots enumerate with folder counts unloaded, so the merge
+    /// must not unconditionally copy the unloaded flag: a folder's
+    /// visible-child count survives a refresh only when the folder's own
+    /// LastWriteTime did not change and it was already loaded. Unconditional
+    /// copying made every activation reconciliation re-enumerate every
+    /// subfolder — a serial full directory scan each (the "mapped folder
+    /// loads slowly" metadata churn).
+    /// </summary>
+    internal static bool DeriveFolderItemCountLoaded(
+        bool targetIsFolder,
+        bool targetIsLoaded,
+        DateTime targetLastModified,
+        bool sourceIsFolder,
+        bool sourceIsLoaded,
+        DateTime sourceLastModified)
+    {
+        return (targetIsFolder &&
+                sourceIsFolder &&
+                targetIsLoaded &&
+                targetLastModified == sourceLastModified) ||
+               sourceIsLoaded;
+    }
+
     private static void ApplyRuntimeItemData(
         WidgetItem target,
         WidgetItem source,
@@ -775,17 +941,58 @@ public partial class WidgetViewModel
     {
         target.Name = source.Name;
         target.Path = source.Path;
-        target.TargetPath = source.TargetPath;
+        if (!string.IsNullOrWhiteSpace(source.TargetPath) ||
+            string.IsNullOrWhiteSpace(target.TargetPath))
+        {
+            target.TargetPath = source.TargetPath;
+        }
+        else if (ShouldDropStaleHydratedShortcutTarget(
+                     target.IsShortcut,
+                     target.HydratedIconFileSize,
+                     target.HydratedIconStamp,
+                     source.IsShortcut,
+                     source.FileSize,
+                     source.LastModified))
+        {
+            // The .lnk itself changed since its target was read: drop the
+            // stored target and the loaded flag so hydration re-reads it.
+            // Snapshots never read targets, so without this guard every
+            // refresh merge wiped the hydrated value.
+            target.TargetPath = source.TargetPath;
+            target.IsShortcutTargetLoaded = false;
+        }
         if (!preserveExistingIconWhenMissing || source.Icon is not null)
         {
             target.Icon = source.Icon;
+        }
+        else if (ShouldDropStaleHydratedIcon(
+                     target.Icon is not null,
+                     target.HydratedIconFileSize,
+                     target.HydratedIconStamp,
+                     source.FileSize,
+                     source.LastModified))
+        {
+            // Ledger mismatch: the file's size or timestamp moved since its
+            // icon was extracted (sleep-time replacements, external edits).
+            // Drop the reference so the hydration universe re-fetches under
+            // the new, content-versioned cache key; matches keep the icon
+            // without touching the cache at all.
+            target.Icon = null;
         }
         target.FileSize = source.FileSize;
         if (source.IsFolderItemCountLoaded)
         {
             target.FolderItemCount = source.FolderItemCount;
         }
-        target.IsFolderItemCountLoaded = source.IsFolderItemCountLoaded;
+        // Computed before LastModified is overwritten below: the comparison
+        // needs the target's previous timestamp.
+        target.IsFolderItemCountLoaded = DeriveFolderItemCountLoaded(
+            target.IsFolder,
+            target.IsFolderItemCountLoaded,
+            target.LastModified,
+            source.IsFolder,
+            source.IsFolderItemCountLoaded,
+            source.LastModified);
         target.CreatedAt = source.CreatedAt;
         target.LastModified = source.LastModified;
         if (source.IsShellKindLoaded)

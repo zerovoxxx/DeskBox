@@ -13,7 +13,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public void ProductionInventory_IsFrozenAtThirtyEightFilesAndNinetyCalls()
+    public void ProductionInventory_IsFrozenAtFortyFilesAndNinetyThreeCalls()
     {
         var expected = new Dictionary<string, int>(StringComparer.Ordinal)
         {
@@ -47,6 +47,10 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             ["src/DeskBox/Services/SearchHistoryService.cs"] = 2,
             ["src/DeskBox/Services/SettingsMigrationService.cs"] = 2,
             ["src/DeskBox/Services/SettingsService.cs"] = 3,
+            // Startup session ledger: read-previous + write-current breadcrumb.
+            ["src/DeskBox/Services/StartupSessionLedger.cs"] = 2,
+            // Crash event report serialization for the support package.
+            ["src/DeskBox/Services/WindowsCrashEventCollector.cs"] = 1,
             ["src/DeskBox/Services/SyncOutboxStore.cs"] = 2,
             ["src/DeskBox/Services/SyncRevisionsStore.cs"] = 2,
             ["src/DeskBox/Services/SyncStateStore.cs"] = 2,
@@ -76,8 +80,8 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             Assert.Equal(expectedCount, actual[path]);
         }
 
-        Assert.Equal(38, actual.Count);
-        Assert.Equal(90, actual.Values.Sum());
+        Assert.Equal(40, actual.Count);
+        Assert.Equal(93, actual.Values.Sum());
 
         string[] expectedContextOwners =
         [
@@ -107,6 +111,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             "src/DeskBox/Services/QuickCaptureStore.cs",
             "src/DeskBox/Services/SearchHistoryService.cs",
             "src/DeskBox/Services/SettingsService.cs",
+            "src/DeskBox/Services/StartupSessionLedger.cs",
             "src/DeskBox/Services/SyncRevisionsStore.cs",
             "src/DeskBox/Services/SyncStateStore.cs",
             "src/DeskBox/Services/TodoWidgetStore.cs",
@@ -114,6 +119,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             "src/DeskBox/Services/WidgetFileStackSettings.cs",
             "src/DeskBox/Services/WidgetLayoutStore.cs",
             "src/DeskBox/Services/WidgetTitleIconAssetStore.cs",
+            "src/DeskBox/Services/WindowsCrashEventCollector.cs",
             "src/DeskBox/Sync/SyncJsonContext.cs"
         ];
         string[] actualContextOwners = ProductionSourceFiles()
@@ -124,7 +130,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             .Order()
             .ToArray();
 
-        Assert.Equal(34, actualContextOwners.Length);
+        Assert.Equal(36, actualContextOwners.Length);
         Assert.Equal(expectedContextOwners, actualContextOwners);
     }
 

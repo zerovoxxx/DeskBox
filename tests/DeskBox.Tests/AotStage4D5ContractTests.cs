@@ -65,6 +65,10 @@ public sealed class AotStage4D5ContractTests
 
         Assert.DoesNotContain("ContextMenuMode = ContextMenuMode.SecondWindow", source, StringComparison.Ordinal);
         Assert.Contains("_trayMenuHost?.ShowMenu(point)", source, StringComparison.Ordinal);
+        Assert.Contains("_trayMenuHost!.ShowMenu(point)", source, StringComparison.Ordinal);
+        Assert.Contains("DegradeTrayContextMenuToNativeMode(trayIcon, point)", source, StringComparison.Ordinal);
+        Assert.Contains("trayIcon.ShowContextMenu(point)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_trayIcon.ShowContextMenu", source, StringComparison.Ordinal);
         Assert.Contains("Win32Helper.TryGetNotifyIconRect", source, StringComparison.Ordinal);
         Assert.Contains("GetFallbackTrayContextMenuAnchorPoint", source, StringComparison.Ordinal);
         Assert.Contains("ScrollViewer.VerticalScrollModeProperty", source, StringComparison.Ordinal);

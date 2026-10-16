@@ -141,7 +141,10 @@ public sealed class StoreAppUpdateService : IAppUpdateService
         }
     }
 
-    public AppUpdateInstallResult StartInstallerHelper(string installerPath, bool silent = true)
+    public AppUpdateInstallResult StartInstallerHelper(
+        string installerPath,
+        bool silent = true,
+        string? appCultureName = null)
     {
         return AppUpdateInstallResult.Failed(StoreInstallFailedError);
     }

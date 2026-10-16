@@ -52,6 +52,7 @@ public sealed partial class FileSurfaceContent :
     private Windows.Foundation.Point _surfaceReorderLastPosition;
     private bool _surfaceReorderHasLastPosition;
     private WidgetItem? _surfaceReorderDraggedItem;
+    private WidgetItem[] _surfaceReorderDraggedItems = [];
     private HashSet<string>? _surfaceReorderPathSet;
     private ListViewBase? _surfaceReorderLastView;
     private WidgetItem[] _pendingPointerDragItems = [];
@@ -440,6 +441,10 @@ public sealed partial class FileSurfaceContent :
         PersistSurfaceReorder();
         ResetDragPayloadCache();
         ViewModel.PrepareStackDisplayForReuse();
+        // Reattaching a parked member is a display transition: icons its
+        // release dropped while parked come back through this heal instead
+        // of waiting for a folder refresh.
+        ViewModel.HealReleasedItemIconsIfIdle();
     }
 
     internal void OnDeactivated()
@@ -915,6 +920,10 @@ public sealed partial class FileSurfaceContent :
 
         _isWindowRevealCompleted = true;
         bool hasDeferredChanges = ViewModel.ResumeBackgroundActivity();
+        // Revealing a long-hidden surface is a display transition; the disk
+        // reconciliation below is freshness-gated, so released icons need
+        // this heal to come back on a quick reveal too.
+        ViewModel.HealReleasedItemIconsIfIdle();
         QueueDiskReconciliationIfStale(
             "reveal-completed",
             hasDeferredChanges);
@@ -1026,7 +1035,7 @@ public sealed partial class FileSurfaceContent :
             return;
         }
 
-        MenuFlyout flyout = item is WidgetStackItem stack
+        FlyoutBase flyout = item is WidgetStackItem stack
             ? CreateStackFlyout(stack)
             : GetSelectedItems().Count > 1
                 ? CreateMultiSelectionFlyout()
@@ -1053,13 +1062,46 @@ public sealed partial class FileSurfaceContent :
                 ItemsList.SelectedItems.Remove(item);
             };
         }
-        FrameworkElement target =
-            FindItemElement(e.OriginalSource) ??
-            sender as FrameworkElement ??
-            Root;
         try
         {
-            flyout.ShowAt(target, e.GetPosition(target));
+            // Engine-owned placement at the invocation point. The target
+            // is a zero-size proxy at the cursor point, not the icon
+            // container: when this flyout flips upward (lower half of the
+            // screen) the engine re-anchors the menu horizontally to the
+            // target RECT's left edge, parking the whole menu left of the
+            // icon; a degenerate 0x0 rect leaves the engine only the
+            // point, so its flip/slide/work-area logic stays and the
+            // rect-anchoring drift goes. Root padding is compensated:
+            // child margins lay out in the padded content box.
+            Windows.Foundation.Point point = e.GetPosition(Root);
+            if (PredictsUpwardFlip(flyout))
+            {
+                // Up-flip drops the primary strip window with its TOP at
+                // the point, hanging the ~80px strip below the cursor and
+                // over the clicked icon; the native Shell menu bottoms
+                // out AT the pointer. Pre-lifting the anchor by the strip
+                // height makes the flipped menu end at the cursor.
+                point.Y -= UpFlipStripLiftDip;
+            }
+
+            var anchor = new Border
+            {
+                Width = 0,
+                Height = 0,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(
+                    point.X - Root.Padding.Left,
+                    point.Y - Root.Padding.Top,
+                    0,
+                    0),
+                IsHitTestVisible = false
+            };
+            Root.Children.Add(anchor);
+            flyout.Closed += (_, _) => Root.Children.Remove(anchor);
+            flyout.ShowAt(
+                anchor,
+                new FlyoutShowOptions { Placement = FlyoutPlacementMode.Bottom });
         }
         catch
         {
@@ -1070,6 +1112,48 @@ public sealed partial class FileSurfaceContent :
             throw;
         }
         e.Handled = true;
+    }
+
+    /// <summary>Strip window height measured on the up-flipped flyout
+    /// (physical px at scale 1; the anchor shift works in DIP).</summary>
+    private const double UpFlipStripLiftDip = 80;
+
+    /// <summary>
+    /// Whether the engine will have to open the menu upward: no room for
+    /// the estimated full menu (rows + strip) below the cursor inside the
+    /// containing monitor's work area. Matching the engine's flip decision
+    /// matters only near the boundary, where either direction fits
+    /// visually; a rough row-count estimate is therefore enough.
+    /// </summary>
+    private bool PredictsUpwardFlip(FlyoutBase flyout)
+    {
+        if (flyout is not CommandBarFlyout commandBar ||
+            !Win32Helper.GetCursorPos(out Win32Helper.POINT cursor))
+        {
+            return false;
+        }
+
+        double scale = Root.XamlRoot?.RasterizationScale ?? 1;
+        if (scale <= 0)
+        {
+            scale = 1;
+        }
+
+        int separators = commandBar.SecondaryCommands
+            .OfType<AppBarSeparator>()
+            .Count();
+        int rows = commandBar.SecondaryCommands.Count - separators;
+        double estimatedMenuHeight =
+            52 + rows * 38 + separators * 9 + UpFlipStripLiftDip;
+
+        return Win32Helper.GetMonitorWorkAreaInfos()
+            .FirstOrDefault(area =>
+                cursor.X >= area.Monitor.Left &&
+                cursor.X < area.Monitor.Right &&
+                cursor.Y >= area.Monitor.Top &&
+                cursor.Y < area.Monitor.Bottom)
+            is { WorkArea: { } work } &&
+            cursor.Y + estimatedMenuHeight * scale > work.Bottom;
     }
 
     private void Items_DragStarting(
@@ -3978,6 +4062,27 @@ public sealed partial class FileSurfaceContent :
 
             return movedSourcePaths;
         }
+        catch (FileService.FileTransferCanceledException ex) when (
+            ex.CompletedResults.Count > 0)
+        {
+            // A shell transfer the user cancelled mid-way already applied
+            // its completed set (the view model's partial-results adapter);
+            // surface it as a partial import instead of a silent cancel —
+            // the retired legacy bridge returned exactly this completed set
+            // and its callers reported it as a short success.
+            await CompleteTrackedImportAsync(ImportCompletionState.Canceled);
+            importedItemCount += ex.CompletedResults.Count;
+            if (moveWhenMapped == true)
+            {
+                movedSourcePaths.AddRange(ex.CompletedResults
+                    .Where(result =>
+                        !File.Exists(result.SourcePath) &&
+                        !Directory.Exists(result.SourcePath))
+                    .Select(result => result.SourcePath));
+            }
+
+            return movedSourcePaths;
+        }
         catch (OperationCanceledException)
         {
             await CompleteTrackedImportAsync(ImportCompletionState.Canceled);
@@ -4340,6 +4445,7 @@ public sealed partial class FileSurfaceContent :
                     StringComparison.Ordinal))
             {
                 _surfaceReorderDraggedItem = null;
+                _surfaceReorderDraggedItems = [];
                 _surfaceReorderPathSet = null;
                 _surfaceReorderLastView = null;
             }
@@ -4360,10 +4466,10 @@ public sealed partial class FileSurfaceContent :
         _surfaceReorderPathSet ??= paths
             .Select(Path.GetFullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        WidgetItem? draggedItem = _surfaceReorderDraggedItem ??
-            ViewModel.Items.FirstOrDefault(item =>
-                _surfaceReorderPathSet.Contains(Path.GetFullPath(item.Path)));
-        if (draggedItem is null)
+        WidgetItem[] draggedItems = _surfaceReorderDraggedItems.Length > 0
+            ? _surfaceReorderDraggedItems
+            : ResolveSurfaceReorderItems();
+        if (draggedItems.Length == 0)
         {
             return;
         }
@@ -4372,7 +4478,7 @@ public sealed partial class FileSurfaceContent :
         {
             if (ViewModel.UsesStackProjection)
             {
-                if (!ViewModel.PrepareVisibleItemReorder(draggedItem))
+                if (!draggedItems.All(ViewModel.PrepareVisibleItemReorder))
                 {
                     return;
                 }
@@ -4384,7 +4490,8 @@ public sealed partial class FileSurfaceContent :
 
             _isSurfaceReorderDragActive = true;
             _surfaceReorderPaths = paths;
-            _surfaceReorderDraggedItem = draggedItem;
+            _surfaceReorderDraggedItem = draggedItems[0];
+            _surfaceReorderDraggedItems = draggedItems;
         }
 
         UpdateSurfaceReorderPreview(position);
@@ -4402,8 +4509,11 @@ public sealed partial class FileSurfaceContent :
             _surfaceReorderPathSet = _surfaceReorderPaths
                 .Select(Path.GetFullPath)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _surfaceReorderDraggedItem = ViewModel.Items.FirstOrDefault(item =>
-                _surfaceReorderPathSet.Contains(Path.GetFullPath(item.Path)));
+            _surfaceReorderDraggedItems = ResolveSurfaceReorderItems();
+            _surfaceReorderDraggedItem = _surfaceReorderDraggedItems
+                .Length > 0
+                    ? _surfaceReorderDraggedItems[0]
+                    : null;
         }
 
         CommitSurfaceReorder(position);
@@ -4649,47 +4759,34 @@ public sealed partial class FileSurfaceContent :
         _surfaceReorderPathSet ??= _surfaceReorderPaths
             .Select(Path.GetFullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        WidgetItem? draggedItem = _surfaceReorderDraggedItem ??
-            ViewModel.Items.FirstOrDefault(item =>
-                _surfaceReorderPathSet.Contains(Path.GetFullPath(item.Path)));
-        if (draggedItem is null)
-        {
-            return;
-        }
-
-        int currentIndex = ViewModel.UsesStackProjection
-            ? activeView.Items.IndexOf(draggedItem)
-            : ViewModel.Items.IndexOf(draggedItem);
-        if (currentIndex < 0)
+        WidgetItem[] draggedItems = _surfaceReorderDraggedItems.Length > 0
+            ? _surfaceReorderDraggedItems
+            : ResolveSurfaceReorderItems();
+        if (draggedItems.Length == 0)
         {
             return;
         }
 
         if (ViewModel.UsesStackProjection)
         {
-            if (!draggedItem.IsStackChild &&
+            if (draggedItems.Any(item => !item.IsStackChild) &&
                 ViewModel.Config.SortMode != WidgetSortMode.Manual)
             {
                 ViewModel.SetSortMode(WidgetSortMode.Manual);
             }
-            ViewModel.MoveVisibleItemForReorder(
-                draggedItem,
+
+            bool moved = ViewModel.MoveVisibleItemsForReorder(
+                draggedItems,
                 targetIndex);
+            if (moved)
+            {
+                ScheduleSurfaceReorderSelectionRestore(draggedItems);
+            }
             return;
         }
 
-        if (targetIndex > currentIndex)
-        {
-            targetIndex--;
-        }
-
-        if (targetIndex == currentIndex || targetIndex < 0)
-        {
-            return;
-        }
-
-        ViewModel.MoveItemForReorder(
-            draggedItem,
+        ViewModel.MoveItemsForReorder(
+            draggedItems,
             targetIndex);
     }
 
@@ -4701,10 +4798,71 @@ public sealed partial class FileSurfaceContent :
         _surfaceReorderStackKey = null;
         _surfaceReorderInsertionIndex = -1;
         _surfaceReorderDraggedItem = null;
+        _surfaceReorderDraggedItems = [];
         _surfaceReorderPathSet = null;
         _surfaceReorderLastView = null;
         _surfaceReorderLastPosition = default;
         _surfaceReorderHasLastPosition = false;
+    }
+
+    private WidgetItem[] ResolveSurfaceReorderItems()
+    {
+        HashSet<string>? pathSet = _surfaceReorderPathSet;
+        if (pathSet is null || pathSet.Count == 0)
+        {
+            return [];
+        }
+
+        return ViewModel.Items
+            .Where(item => pathSet.Contains(Path.GetFullPath(item.Path)))
+            .ToArray();
+    }
+
+    // A stack-projection rebuild replaces the visible collection, dropping
+    // the multi-selection the user dragged with. Restore it once the rebuilt
+    // projection has settled so the same block can be dragged again for
+    // fine-tuning without reselecting every item.
+    private void ScheduleSurfaceReorderSelectionRestore(
+        IReadOnlyList<WidgetItem> draggedItems)
+    {
+        if (draggedItems.Count == 0)
+        {
+            return;
+        }
+
+        string[] paths = draggedItems
+            .Select(item => Path.GetFullPath(item.Path))
+            .ToArray();
+        DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () =>
+            {
+                if (_isDisposed || IsStackPopoverInteractionActive)
+                {
+                    return;
+                }
+
+                ListViewBase view = GetActiveItemsView();
+                HashSet<string> pathSet = paths
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                List<WidgetItem> restored = view.Items
+                    .OfType<WidgetItem>()
+                    .Where(item => item is not WidgetStackItem &&
+                        pathSet.Contains(Path.GetFullPath(item.Path)))
+                    .ToList();
+                if (restored.Count == 0)
+                {
+                    return;
+                }
+
+                view.SelectedItems.Clear();
+                foreach (WidgetItem item in restored)
+                {
+                    view.SelectedItems.Add(item);
+                }
+
+                UpdateSelectionCommandBar();
+            });
     }
 
     private void CommitSurfaceReorder(
@@ -5414,6 +5572,36 @@ public sealed partial class FileSurfaceContent :
                     "file-paste"));
             }
 
+            return;
+        }
+
+        // Paste shares the drop channels' transfer guards: a source that is
+        // itself mid-transfer, an all-sources-already-in-destination no-op,
+        // and an unsafe directory move each get their dedicated feedback.
+        // Without these, the plan-layer same-directory filter made the
+        // cut-then-paste-in-place case a silent no-op with no UI response.
+        if (HasTransferConflict(sourcePaths, ViewModel.CurrentFolderPath))
+        {
+            ShowTransferBlockedFeedback(
+                _fileService.TransferSessions.GetState(
+                    sourcePaths[0]) is { IsActive: true } sourceState
+                    ? sourceState
+                    : _fileService.TransferSessions.GetState(
+                        ViewModel.CurrentFolderPath));
+            return;
+        }
+        if (await AreAllSourcesAlreadyInDestinationResolvedAsync(
+                sourcePaths,
+                ViewModel.CurrentFolderPath))
+        {
+            ShowSameDirectoryDropFeedback();
+            return;
+        }
+        if (await Task.Run(() => FileService.IsUnsafeDirectoryTransfer(
+                sourcePaths,
+                ViewModel.CurrentFolderPath)))
+        {
+            ShowUnsafeDirectoryDropFeedback();
             return;
         }
 

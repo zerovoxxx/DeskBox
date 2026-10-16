@@ -737,7 +737,7 @@ public sealed partial class WidgetManager
             RememberLastQuickCaptureFileWidgetTarget(targetWidgetId);
             if (_fileWidgets.TryGetValue(targetWidgetId, out var targetEntry))
             {
-                await targetEntry.ViewModel.RefreshFromConfigAsync();
+                await targetEntry.ViewModel.RefreshFromConfigAsync(clearIconCacheBeforeHydration: false);
                 targetEntry.RevealSavedItem(destinationPath);
             }
             else
@@ -752,7 +752,7 @@ public sealed partial class WidgetManager
                             StringComparison.Ordinal));
                 if (contentWindow?.CurrentContent is FileWidgetContentAdapter fileSurface)
                 {
-                    await fileSurface.ViewModel.RefreshFromConfigAsync();
+                    await fileSurface.ViewModel.RefreshFromConfigAsync(clearIconCacheBeforeHydration: false);
                     fileSurface.RevealSavedItem(destinationPath);
                 }
             }

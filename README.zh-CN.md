@@ -7,7 +7,7 @@
 > 目前暂不接受外部 PR 合并——欢迎通过 Issue / Discussion 提交 Bug、功能建议与技术讨论，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 [![CI](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml/badge.svg)](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml)
-[![1.5.7 版本](https://img.shields.io/badge/release-1.5.7-2563EB.svg)](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.7)
+[![1.5.8 版本](https://img.shields.io/badge/release-1.5.8-2563EB.svg)](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.8)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D4.svg)](#环境要求)
 [![x64 and ARM64](https://img.shields.io/badge/architecture-x64%20%7C%20ARM64-5C2D91.svg)](#下载)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
@@ -41,10 +41,10 @@ DeskBox 使用贴近 Windows 原生体验的材质，同时保留普通桌面文
 
 ## 下载
 
-DeskBox 1.5.7 已进入发版准备阶段。下方 [GitHub Releases](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.7) 下载链接会在正式发布后生效。
+DeskBox 1.5.8 已进入发版准备阶段。下方 [GitHub Releases](https://github.com/Tianyu199509/DeskBox/releases/tag/v1.5.8) 下载链接会在正式发布后生效。
 
-- [DeskBox 1.5.7 x64 安装包](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.7/DeskBox_Setup_1.5.7_x64.exe)，推荐大多数 Intel 和 AMD 电脑使用。
-- [DeskBox 1.5.7 ARM64 安装包](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.7/DeskBox_Setup_1.5.7_arm64.exe)，推荐骁龙、Surface Pro X 等 Windows on ARM 电脑使用。
+- [DeskBox 1.5.8 x64 安装包](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.8/DeskBox_Setup_1.5.8_x64.exe)，推荐大多数 Intel 和 AMD 电脑使用。
+- [DeskBox 1.5.8 ARM64 安装包](https://github.com/Tianyu199509/DeskBox/releases/download/v1.5.8/DeskBox_Setup_1.5.8_arm64.exe)，推荐骁龙、Surface Pro X 等 Windows on ARM 电脑使用。
 
 两个安装包都是 Full Native AOT 构建，并内置对应架构的私有 Windows App Runtime 2.5.1，可离线安装，不需要另外下载 .NET 10 或 Windows App Runtime。
 
@@ -129,6 +129,14 @@ DeskBox 1.5.7 已进入发版准备阶段。下方 [GitHub Releases](https://git
 - 支持设置本地备份与恢复；待办、随记和格子样式还可定时备份到你自己的 WebDAV 服务器——密码保存在 Windows 凭据管理器，每个数据域独立开关，远端快照可浏览、可按合并或完全恢复两种模式还原。
 - 可导出经过隐私过滤的一键诊断包用于排查问题。
 - 设置使用可恢复快照，退出时刷新待保存内容；保存失败会明确记录和提示，不再静默恢复默认配置。
+
+## 1.5.8 更新亮点
+
+- **更准确的管理员运行提示。**「以管理员身份运行」提示只在 DeskBox 以高于资源管理器的权限运行时出现，因此全桌面提权的电脑（含公司统一管理机）不再显示该提示。提示出现时可一键退出当前实例并按步骤以普通权限重新打开；一键更新也不再以管理员身份重启应用。
+- **资源管理器提权时优雅降级。** Explorer 以管理员运行时 DeskBox 保持可达——唤出热键与设置继续可用，说明弹窗取代静默的英文报错框，诊断还能识别快捷方式的"以管理员身份运行"勾选。
+- **维护波次。** 拖动待办不再崩溃；切换分组不再丢失叠放成员图标；剪切子文件夹粘贴回原处不再卡死；自动整理规则跨重启保持；桌面反复崩溃时 DeskBox 不再在登录时反复重启。
+
+完整内容见 [更新日志](CHANGELOG.md) 和 [1.5.8 发布说明](docs/releases/v1.5.8.md)。
 
 ## 1.5.7 更新亮点
 
@@ -254,8 +262,8 @@ ISCC.exe /DDeskBoxNativeAot=1 /DDeskBoxBundledRuntime=1 /DMyAppReleaseDir=..\.ar
 预期输出：
 
 ```text
-Output\DeskBox_Setup_1.5.7_x64.exe
-Output\DeskBox_Setup_1.5.7_arm64.exe
+Output\DeskBox_Setup_1.5.8_x64.exe
+Output\DeskBox_Setup_1.5.8_arm64.exe
 ```
 
 ## 项目结构

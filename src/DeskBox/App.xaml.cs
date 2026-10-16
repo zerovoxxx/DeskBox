@@ -100,6 +100,14 @@ public partial class App : Application
     private static EventWaitHandle? _activationEvent;
     private static RegisteredWaitHandle? _activationRegistration;
 
+    // Written by the primary instance only; secondary activations never touch
+    // the file. See StartupSessionLedger for the lifecycle contract.
+    private readonly StartupSessionLedger? _startupSessionLedger;
+    private readonly StartupStormAssessment? _startupStormAssessment;
+
+    private bool SuppressFileMutatingStartup =>
+        _startupStormAssessment?.SuppressFileMutatingStartup == true;
+
     private TaskbarIcon? _trayIcon;
     private Window? _trayWindow;
     private Window? _folderPickerHelperWindow;
@@ -143,6 +151,7 @@ public partial class App : Application
     private readonly ShutdownSequence _shutdownSequence = new(Log);
     private static int s_shutdownRequested;
     internal static bool IsShuttingDown => Volatile.Read(ref s_shutdownRequested) != 0;
+    private static readonly TimeSpan ShutdownHardTerminateGrace = TimeSpan.FromSeconds(3);
     private TodoReminderService? _todoReminderService => _todoReminderRuntime?.Current as TodoReminderService;
     private DisplayAreaWatcherService? _displayAreaWatcher;
     private DisplayTopologyTransitionCoordinator? _displayTopologyTransitionCoordinator;
@@ -274,6 +283,21 @@ public partial class App : Application
             true,
             DeskBoxDataPathService.Current.SingleInstanceMutexName,
             out bool createdNew);
+        if (createdNew)
+        {
+            // The launch breadcrumb is written before anything can exit so a
+            // death anywhere in this launch is attributable on the next one.
+            _startupSessionLedger = new StartupSessionLedger(
+                Path.Combine(DeskBoxDataPathService.Current.RootPath, "startup-ledger.json"));
+            _startupStormAssessment = _startupSessionLedger.BeginPrimaryLaunch();
+            if (_startupStormAssessment.SuppressFileMutatingStartup)
+            {
+                Log(
+                    $"[Startup] Storm guard active ({_startupStormAssessment.Reason}): " +
+                    "desktop file operations stay deferred this launch.");
+            }
+        }
+
         bool notificationLaunch = NativeNotificationActivationBootstrap.IsNotificationLaunch(
             Environment.GetCommandLineArgs());
         if (createdNew || notificationLaunch)
@@ -362,7 +386,8 @@ public partial class App : Application
                 $"[Elevation] Elevated launch detected " +
                 $"uacDisabled={_startupElevationAssessment.IsUacDisabled} " +
                 $"explorerElevated={_startupElevationAssessment.IsExplorerElevated} " +
-                $"canRelaunch={_startupElevationAssessment.CanRelaunchUnelevated}");
+                $"canRelaunch={_startupElevationAssessment.CanRelaunchUnelevated} " +
+                $"mismatch={_startupElevationAssessment.Mismatch}");
             if (_processStartupLaunchDetected)
             {
                 // Nobody is watching an unattended launch: fix the cause and
@@ -385,6 +410,7 @@ public partial class App : Application
                     if (DragDropPermissionService.TryRelaunchAsExplorerUser(relaunchArguments))
                     {
                         Log("[Elevation] Unattended launch relaunched unelevated; exiting elevated instance");
+                        _startupSessionLedger?.MarkCleanExit();
                         _nativeNotificationService?.Dispose();
                         DrainLogQueue();
                         Environment.Exit(0);
@@ -1336,15 +1362,27 @@ public partial class App : Application
             await startupAutomaticSnapshotTask;
             if (IsShuttingDown) return;
             int recoveredDesktopItems = 0;
-            await RunOptionalStartupStepAsync(
-                "desktop-organization-recovery",
-                async () => recoveredDesktopItems = await new DesktopOrganizationTransaction(
-                    SettingsService,
-                    FileService,
-                    widgetManager: WidgetManager).RecoverPendingAsync());
-            if (recoveredDesktopItems > 0)
+            if (SuppressFileMutatingStartup)
             {
-                Log($"[DesktopOrganization] Recovered {recoveredDesktopItems} items from an interrupted transaction.");
+                // The interrupted-transaction journal is durable; the next
+                // healthy launch replays it. Replaying desktop file moves
+                // into a launch storm is how interrupted operations pile up.
+                Log(
+                    "[Startup] Storm guard: deferring desktop-organization recovery " +
+                    "until a launch that follows a clean exit.");
+            }
+            else
+            {
+                await RunOptionalStartupStepAsync(
+                    "desktop-organization-recovery",
+                    async () => recoveredDesktopItems = await new DesktopOrganizationTransaction(
+                        SettingsService,
+                        FileService,
+                        widgetManager: WidgetManager).RecoverPendingAsync());
+                if (recoveredDesktopItems > 0)
+                {
+                    Log($"[DesktopOrganization] Recovered {recoveredDesktopItems} items from an interrupted transaction.");
+                }
             }
             // A detached storage drive must not abort widget restoration.
             bool managedStorageRootUnavailable = false;
@@ -1427,6 +1465,25 @@ public partial class App : Application
                 DesktopAutoOrganizationWatcher.ItemOrganized += ShowDesktopAutoOrganizationNotification;
                 DesktopAutoOrganizationWatcher.AutoOrganizationTargetUnavailable +=
                     ShowDesktopAutoOrganizationTargetUnavailableNotification;
+                if (SuppressFileMutatingStartup)
+                {
+                    // Constructed now (event wiring intact) but held idle for
+                    // the suppression window: FileSystemWatcher stays off and
+                    // no organize pass can trigger while the storm lasts.
+                    var deferredStart = UiDispatcherQueue.CreateTimer();
+                    deferredStart.Interval = StartupStormPolicy.SuppressionWindow;
+                    deferredStart.Tick += (_, _) =>
+                    {
+                        deferredStart.Stop();
+                        DesktopAutoOrganizationWatcher?.Start();
+                    };
+                    deferredStart.Start();
+                    Log(
+                        "[Startup] Storm guard: desktop auto-organization watcher start deferred " +
+                        $"{StartupStormPolicy.SuppressionWindow.TotalMinutes:F0} minutes.");
+                    return;
+                }
+
                 DesktopAutoOrganizationWatcher.Start();
             });
 
@@ -2012,9 +2069,26 @@ public partial class App : Application
     {
         Log($"[Lifecycle] Recovery signal received: {reason}");
         _diagnosticsService?.RecordLifecycleEvent(reason);
+        // S6 instrumentation (silent freeze after explorer restart): the
+        // topology-recovery storm re-parents and re-positions every widget.
+        // Verbose carries the timing breakdown; the default-level line fires
+        // only when the storm ran long enough to read as a freeze, so field
+        // logs surface the S6 signature without verbose enabled.
+        long recoveryStart = System.Diagnostics.Stopwatch.GetTimestamp();
         WidgetLayerService.InvalidateDesktopIconViewCache();
         _displayAreaWatcher?.RefreshNow();
         RequestDisplayTopologyRestore("lifecycle-" + reason);
+        double topologyMs =
+            System.Diagnostics.Stopwatch.GetElapsedTime(recoveryStart).TotalMilliseconds;
+        App.LogVerbose(
+            $"[Lifecycle] Recovery topology phase reason={reason} " +
+            $"tookMs={topologyMs:F0}");
+        if (topologyMs > 2000)
+        {
+            Log(
+                $"[Lifecycle] Recovery storm ran {topologyMs:F0}ms for " +
+                $"{reason}; if the app felt frozen here, capture a dump (S6).");
+        }
 
         bool requiresExternalRecovery =
             reason.Contains("resume", StringComparison.OrdinalIgnoreCase) ||
@@ -2045,6 +2119,9 @@ public partial class App : Application
 
     private void FlushSettingsForEndSession(string reason)
     {
+        // The OS ends the process after this flush without the shutdown
+        // sequence, so the launch breadcrumb is closed here.
+        _startupSessionLedger?.MarkCleanExit();
         Log($"[Lifecycle] Flushing settings for {reason}.");
         try
         {
@@ -3815,11 +3892,57 @@ public partial class App : Application
     /// Shows the elevated-launch notice once startup has produced a usable
     /// surface. Skipped for unattended launches (the constructor already
     /// attempted a silent unelevated relaunch; nobody is watching a dialog)
-    /// and on shutdown.
+    /// and on shutdown. Only the asymmetric mismatch warns: on a fully
+    /// elevated desktop (company machines, UAC-off) DeskBox and the shell
+    /// share an integrity level, drag works, and a "running as
+    /// administrator" warning would be a false alarm.
     /// </summary>
     private void ShowElevationNoticeIfNeeded()
     {
         if (!_startupElevationAssessment.IsCurrentProcessElevated ||
+            _startupElevationAssessment.Mismatch != ShellIntegrityMismatch.AppAboveShell ||
+            IsStartupMode ||
+            IsShuttingDown ||
+            _elevationNoticeWindow is not null)
+        {
+            return;
+        }
+
+        // Persisted RUNASADMIN-style compatibility layers keep relaunching
+        // DeskBox elevated, so scrub them while the notice is up — whether
+        // the user exits via the button or the window X, their next normal
+        // launch must be able to land unelevated. Failures log only.
+        _ = DragDropPermissionService.ClearElevationCompatibilityFlags();
+
+        _elevationNoticeWindow = new ElevationNoticeWindow(LocalizationService, _startupElevationAssessment);
+        _elevationNoticeWindow.Closed += (_, _) => _elevationNoticeWindow = null;
+        ThemeService.TrackWindow(_elevationNoticeWindow);
+        _elevationNoticeWindow.Activate();
+        Log("[Elevation] Notice shown for interactive elevated launch");
+    }
+
+    /// <summary>
+    /// When the shell runs above this process's integrity, tray creation is
+    /// blocked by UIPI rather than by a DeskBox defect. Once the tray retry
+    /// loop has confirmed the icon is gone, surface the explanatory notice so
+    /// the user is not left with an invisible tray and no reason — the
+    /// session itself stays alive (the lifeline accepts the hotkey as a
+    /// usable surface).
+    /// </summary>
+    private async Task ShowShellElevationNoticeWhenTrayFailsAsync(Task<bool> trayCreation)
+    {
+        bool trayCreated;
+        try
+        {
+            trayCreated = await trayCreation;
+        }
+        catch (Exception ex)
+        {
+            Log($"[Elevation] Tray creation task faulted: {ex.Message}");
+            trayCreated = false;
+        }
+
+        if (trayCreated ||
             IsStartupMode ||
             IsShuttingDown ||
             _elevationNoticeWindow is not null)
@@ -3831,7 +3954,7 @@ public partial class App : Application
         _elevationNoticeWindow.Closed += (_, _) => _elevationNoticeWindow = null;
         ThemeService.TrackWindow(_elevationNoticeWindow);
         _elevationNoticeWindow.Activate();
-        Log("[Elevation] Notice shown for interactive elevated launch");
+        Log("[Elevation] Notice shown for shell-above-app tray failure");
     }
 
     public void ShowOnboarding(bool resumeProgress = false)
@@ -5229,16 +5352,34 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Delayed hard termination that guarantees the process dies even when
-    /// Application.Exit fails to unwind every thread. A pool thread, so it
-    /// never keeps a healthy shutdown alive; the log drain mirrors the
-    /// startup fatal path so the exit tail is not swallowed.
+    /// Delayed termination that guarantees the process dies even when
+    /// Application.Exit fails to unwind the XAML loop. Stage one is the
+    /// graceful Environment.Exit. It never returns, and under CoreCLR it
+    /// waits forever for a finalizer thread that a cross-apartment WinRT
+    /// release can block, so stage two is armed first on its own thread and
+    /// hard-terminates. Both are background threads, so neither keeps a
+    /// healthy shutdown alive; the log drain mirrors the startup fatal path
+    /// so the exit tail is not swallowed.
     /// </summary>
     private static void ArmShutdownExitBackstop(TimeSpan delay)
     {
+        var hardStop = new Thread(() =>
+        {
+            Thread.Sleep(delay + ShutdownHardTerminateGrace);
+            Log("[Shutdown] Exit backstop did not complete; terminating the process.");
+            DrainLogQueue();
+            Win32Helper.TerminateCurrentProcess(0);
+        })
+        {
+            IsBackground = true,
+            Name = "DeskBox shutdown hard stop"
+        };
+        hardStop.Start();
+
         _ = Task.Run(async () =>
         {
             await Task.Delay(delay);
+            Log($"[Shutdown] Exit backstop fired: the XAML loop was still alive {delay.TotalSeconds:F0}s after Exit().");
             DrainLogQueue();
             Environment.Exit(0);
         });
@@ -5246,6 +5387,9 @@ public partial class App : Application
 
     private async Task ShutdownApplicationAsync()
     {
+        // Recorded first so a death anywhere inside teardown still reads as
+        // an intentional exit on the next launch (storm-guard semantics).
+        _startupSessionLedger?.MarkCleanExit();
         bool dependentTeardownCompleted = true;
         try
         {
@@ -5299,12 +5443,13 @@ public partial class App : Application
                     // Application.Exit only requests the XAML loop to stop.
                     // When teardown was skipped, its pump can stay alive after
                     // Exit returns (measured: the deadline probe pumped
-                    // forever); even a completed teardown can leave foreign
-                    // threads parking the process as a silent zombie — tray
-                    // gone, mutex released, process resident and pinning the
-                    // thumbnail proxy's stdin pipe (feedback 555/556). Arm the
-                    // hard exit on every path; a healthy Exit() outruns the
-                    // timer and the delayed call never fires.
+                    // forever); even a completed teardown can leave dispatcher
+                    // work that keeps re-queueing itself, so the UI thread
+                    // spins and the loop never drains — a silent zombie with
+                    // tray gone, mutex released, process resident and pinning
+                    // the thumbnail proxy's stdin pipe (feedback 555/556,
+                    // #530/#532). Arm the hard exit on every path; a healthy
+                    // Exit() outruns the timer and the delayed call never fires.
                     ArmShutdownExitBackstop(TimeSpan.FromSeconds(
                         dependentTeardownCompleted ? 5 : 3));
                     if (dependentTeardownCompleted &&

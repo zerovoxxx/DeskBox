@@ -758,6 +758,144 @@ public sealed class FileItemMultiDragTests
                 sourceItemCount));
     }
 
+    [Fact]
+    public void TryMoveDisplayUnitOverrides_MovesSelectionAsOneStableBlock()
+    {
+        List<string> order =
+        [
+            "Item:E:\\DESKBOX\\FIRST.TXT",
+            "Item:E:\\DESKBOX\\SECOND.TXT",
+            "Item:E:\\DESKBOX\\THIRD.TXT",
+            "Item:E:\\DESKBOX\\FOURTH.TXT"
+        ];
+
+        bool moved = WidgetViewModel.TryMoveDisplayUnitOverrides(
+            order,
+            [
+                "Item:E:\\DESKBOX\\FIRST.TXT",
+                "Item:E:\\DESKBOX\\THIRD.TXT"
+            ],
+            targetPosition: 2);
+
+        Assert.True(moved);
+        Assert.Equal(
+        [
+            "Item:E:\\DESKBOX\\SECOND.TXT",
+            "Item:E:\\DESKBOX\\FOURTH.TXT",
+            "Item:E:\\DESKBOX\\FIRST.TXT",
+            "Item:E:\\DESKBOX\\THIRD.TXT"
+        ], order);
+    }
+
+    [Fact]
+    public void TryMoveDisplayUnitOverrides_DoesNotMutateEquivalentDrop()
+    {
+        List<string> order =
+        [
+            "Item:E:\\DESKBOX\\FIRST.TXT",
+            "Item:E:\\DESKBOX\\SECOND.TXT",
+            "Item:E:\\DESKBOX\\THIRD.TXT"
+        ];
+
+        // second+third already sit behind exactly one non-moving unit.
+        bool moved = WidgetViewModel.TryMoveDisplayUnitOverrides(
+            order,
+            [
+                "Item:E:\\DESKBOX\\SECOND.TXT",
+                "Item:E:\\DESKBOX\\THIRD.TXT"
+            ],
+            targetPosition: 1);
+
+        Assert.False(moved);
+        Assert.Equal(
+        [
+            "Item:E:\\DESKBOX\\FIRST.TXT",
+            "Item:E:\\DESKBOX\\SECOND.TXT",
+            "Item:E:\\DESKBOX\\THIRD.TXT"
+        ], order);
+    }
+
+    [Fact]
+    public void TryMoveDisplayUnitOverrides_IgnoresKeysMissingFromOrder()
+    {
+        List<string> order =
+        [
+            "Item:E:\\DESKBOX\\FIRST.TXT",
+            "Item:E:\\DESKBOX\\SECOND.TXT"
+        ];
+
+        bool moved = WidgetViewModel.TryMoveDisplayUnitOverrides(
+            order,
+            ["Item:E:\\DESKBOX\\ABSENT.TXT"],
+            targetPosition: 0);
+
+        Assert.False(moved);
+        Assert.Equal(
+        [
+            "Item:E:\\DESKBOX\\FIRST.TXT",
+            "Item:E:\\DESKBOX\\SECOND.TXT"
+        ], order);
+    }
+
+    [Fact]
+    public void TryComputeItemBlockReorder_CompensatesMovingItemsBeforeTarget()
+    {
+        WidgetItem first = CreateItem("first.txt");
+        WidgetItem second = CreateItem("second.txt");
+        WidgetItem third = CreateItem("third.txt");
+        WidgetItem fourth = CreateItem("fourth.txt");
+        WidgetItem fifth = CreateItem("fifth.txt");
+        List<WidgetItem> items = [first, second, third, fourth, fifth];
+
+        // Dragging first+third onto the slot before fifth: two moving items
+        // sit ahead of the drop target, so the block lands at index 2.
+        bool moved = WidgetViewModel.TryComputeItemBlockReorder(
+            items,
+            [first, third],
+            targetIndex: 4,
+            out int insertionIndex);
+
+        Assert.True(moved);
+        Assert.Equal(2, insertionIndex);
+    }
+
+    [Fact]
+    public void TryComputeItemBlockReorder_ClampsToTrailingRange()
+    {
+        WidgetItem first = CreateItem("first.txt");
+        WidgetItem second = CreateItem("second.txt");
+        WidgetItem third = CreateItem("third.txt");
+        WidgetItem fourth = CreateItem("fourth.txt");
+        List<WidgetItem> items = [first, second, third, fourth];
+
+        bool moved = WidgetViewModel.TryComputeItemBlockReorder(
+            items,
+            [first, fourth],
+            targetIndex: 4,
+            out int insertionIndex);
+
+        Assert.True(moved);
+        Assert.Equal(2, insertionIndex);
+    }
+
+    [Fact]
+    public void TryComputeItemBlockReorder_ReturnsFalseForEquivalentDrop()
+    {
+        WidgetItem first = CreateItem("first.txt");
+        WidgetItem second = CreateItem("second.txt");
+        WidgetItem third = CreateItem("third.txt");
+        List<WidgetItem> items = [first, second, third];
+
+        bool moved = WidgetViewModel.TryComputeItemBlockReorder(
+            items,
+            [first, second],
+            targetIndex: 2,
+            out int insertionIndex);
+
+        Assert.False(moved);
+        Assert.Equal(0, insertionIndex);
+    }
+
     private static WidgetItem CreateItem(string path) => new()
     {
         Name = path,
