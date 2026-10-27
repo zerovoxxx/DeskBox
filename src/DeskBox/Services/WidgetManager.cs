@@ -85,6 +85,7 @@ internal interface IDesktopWidgetWindow
     Windows.Foundation.Rect AnimationBounds { get; }
     Windows.Foundation.Rect RestingAnimationBounds { get; }
     bool IsBoundsTransitionActive { get; }
+    bool IsTitleBarDragTransitionActive { get; }
     void ApplyAppearancePreview();
     void ApplyPerformanceSettings();
     void BeginDisplayTopologyTransition(long generation);
@@ -138,6 +139,12 @@ public sealed partial class WidgetManager
     private readonly IQuickCaptureSettings? _quickCaptureSettings;
     private readonly ISearchFeatureSettings? _searchFeatureSettings;
     private const string ManagedShortcutDescriptionPrefix = "DeskBox mapped widget shortcut:";
+
+    /// <summary>
+    /// Retry cadence for a layer refresh deferred behind an animating tray
+    /// toggle (longest animation tier runs ~700ms, so a few retries settle).
+    /// </summary>
+    private const int LayerRefreshDuringToggleRetryDelayMs = 250;
 
     private readonly SettingsService _settingsService;
     private readonly FileService _fileService;
@@ -553,7 +560,8 @@ public sealed partial class WidgetManager
         _desktopPathProvider = desktopPathProvider;
         _recycleManagedFolderDeletes = recycleManagedFolderDeletes;
         _widgetRegistry = WidgetRegistry.Default;
-        _sessionManager = new WidgetSessionManager(App.LogVerbose);
+        _sessionManager = new WidgetSessionManager(App.LogVerbose, App.Log);
+        _sessionManager.InteractionActiveChanged += OnSessionInteractionActiveChanged;
         _fileWidgetHostDiagnostics = new FileWidgetHostDiagnostics();
         _trayToggleRequestQueue = new(ExecuteQueuedTrayToggleAsync);
         InitializeCapsuleArrangementState();
@@ -773,6 +781,26 @@ public sealed partial class WidgetManager
         if (!HasUiThreadAccess())
         {
             UiDispatch.RunOrDefer(() => RefreshVisibleWidgetDesktopLayers(reason));
+            return;
+        }
+
+        if (_isTogglingWidgetsDesktopLayer)
+        {
+            // A raise/hide toggle is animating. This refresh force-restores
+            // every visible window, and show animations have no
+            // CanRestoreDesktopLayer guard — running it mid-animation would
+            // dismantle the band being raised (the QR topmost band
+            // especially). This path is also the only immediate re-layerer
+            // for already-visible windows on QR→dynamic switches, so the
+            // refresh is deferred until the toggle settles, never dropped.
+            UiDispatch.RunOrDefer(async () =>
+            {
+                await Task.Delay(LayerRefreshDuringToggleRetryDelayMs);
+                if (!App.IsShuttingDown)
+                {
+                    RefreshVisibleWidgetDesktopLayers(reason);
+                }
+            });
             return;
         }
 
@@ -2393,18 +2421,6 @@ public sealed partial class WidgetManager
                _widgetRegistry.IsAvailableForSession(widget, _settingsService.Settings);
     }
 
-    private void QueueTrayRaiseTopMostConfirmation(
-        IReadOnlyList<IDesktopWidgetWindow> windows,
-        long generation,
-        TimeSpan delay)
-    {
-        App.UiDispatcherQueue.TryEnqueue(async () =>
-        {
-            await Task.Delay(delay);
-            ConfirmTrayRaiseTopMost(windows, generation);
-        });
-    }
-
     private static bool CanCreateWidgetWindowOnCurrentThread()
     {
         return App.UiDispatcherQueue is not null;
@@ -2533,6 +2549,8 @@ public sealed partial class WidgetManager
         CancelAllWidgetSurfaceSwitches();
         StopTrayLayerRestoreMonitor();
         StopDesktopPinnedBeddingWatchdog();
+        StopInteractionLeakWatchdog();
+        _sessionManager.InteractionActiveChanged -= OnSessionInteractionActiveChanged;
         DisposeWidgetDetachPlacementPreview();
         _settingsService.SettingsChanged -= OnSettingsChanged;
         _settingsService.AppearancePreviewChanged -= ApplyAppearancePreview;

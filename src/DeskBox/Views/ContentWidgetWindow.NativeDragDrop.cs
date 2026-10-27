@@ -109,6 +109,8 @@ public sealed partial class ContentWidgetWindow
                 target.SameVolumeProbe = IsNativeDropOnSameVolume;
                 target.ImportBusyProbe = IsNativeDropImportBusy;
                 target.UndisplayableDropBlocked += NativeFileDropTarget_UndisplayableDropBlocked;
+                target.ZeroResultDropBlocked += NativeFileDropTarget_ZeroResultDropBlocked;
+                target.ImportBusyDropBlocked += NativeFileDropTarget_ImportBusyDropBlocked;
                 target.DropIntentEvent += NativeFileDropTarget_DropIntentEvent;
                 target.DropEvent += NativeFileDropTarget_DropEvent;
                 target.Register();
@@ -290,6 +292,22 @@ public sealed partial class ContentWidgetWindow
             return openWith.Contains("%1", StringComparison.Ordinal)
                 ? new NativeDropDescriptionText(openWith, launchTarget.Name)
                 : new NativeDropDescriptionText("%1", openWith);
+        }
+
+        // The Recycle Bin namespace tile recycles the drop: its description
+        // must say so, or the generic per-widget move/copy caption would
+        // advertise an import that never happens.
+        if (CurrentContent is FileWidgetContentAdapter &&
+            _nativeFileDropItemTarget is { } descriptionBinCandidate &&
+            ItemDropBehaviorPolicy.Resolve(descriptionBinCandidate) ==
+                ItemDropBehavior.RecycleBinDelete)
+        {
+            string binMessage = ToShellDropDescriptionMessage(
+                App.Current.LocalizationService.T(
+                    "Widget.DropOnRecycleBinHint"));
+            return binMessage.Contains("%1", StringComparison.Ordinal)
+                ? new NativeDropDescriptionText(binMessage, string.Empty)
+                : new NativeDropDescriptionText("%1", binMessage);
         }
 
         if (CurrentContent is FileWidgetContentAdapter &&
@@ -886,7 +904,8 @@ public sealed partial class ContentWidgetWindow
                 : ItemDropBehavior.None;
             WidgetItem? nativeTarget = hitBehavior is
                 ItemDropBehavior.FolderImport or
-                ItemDropBehavior.StackImport
+                ItemDropBehavior.StackImport or
+                ItemDropBehavior.RecycleBinDelete
                     ? hitItem
                     : null;
             _nativeFileDropItemTarget = nativeTarget;
@@ -1128,9 +1147,11 @@ public sealed partial class ContentWidgetWindow
 
     /// <summary>
     /// The deferred half of the shortcut launch: runs one dispatcher turn
-    /// after the drop callback returned. Only paths that exist on disk reach
-    /// the command line — a synthetic CF_HDROP can carry arbitrary
-    /// flag-shaped strings ("/k", "-Command") that quoted-argument
+    /// after the drop callback returned. The existence filter leaves the UI
+    /// thread entirely — UNC paths stat in seconds each (contract ⑫) — while
+    /// the launch itself stays serialized on the UI thread. Only paths that
+    /// exist on disk reach the command line — a synthetic CF_HDROP can carry
+    /// arbitrary flag-shaped strings ("/k", "-Command") that quoted-argument
     /// passing would forward to the launched application as argv tokens.
     /// </summary>
     private void LaunchDroppedFilesDeferred(
@@ -1139,9 +1160,33 @@ public sealed partial class ContentWidgetWindow
         IReadOnlyList<string> droppedPaths,
         bool containsTemporaryFiles)
     {
-        string[] existingPaths = droppedPaths
-            .Where(System.IO.File.Exists)
-            .ToArray();
+        IReadOnlyList<string> pathsToStat = droppedPaths;
+        _ = Task.Run(() =>
+        {
+            string[] existingPaths = pathsToStat
+                .Where(System.IO.File.Exists)
+                .ToArray();
+            _ = DispatcherQueue.TryEnqueue(() => LaunchDroppedFilesResolved(
+                shortcutPath,
+                applicationName,
+                droppedPaths,
+                containsTemporaryFiles,
+                existingPaths));
+        });
+    }
+
+    private void LaunchDroppedFilesResolved(
+        string shortcutPath,
+        string applicationName,
+        IReadOnlyList<string> droppedPaths,
+        bool containsTemporaryFiles,
+        string[] existingPaths)
+    {
+        if (IsClosing)
+        {
+            return;
+        }
+
         if (existingPaths.Length == 0)
         {
             App.Log(
@@ -1219,6 +1264,33 @@ public sealed partial class ContentWidgetWindow
     {
         RunOnNativeFileDropUiThread(file =>
             file.NotifyNativeDropBlockedUndisplayable(requestedCount));
+    }
+
+    private void NativeFileDropTarget_ZeroResultDropBlocked()
+    {
+        // Always enqueue one dispatcher turn: the zero-result notification
+        // can fire from the OLE continuation, and the feedback surface must
+        // not be touched inside a callback frame (contract §23).
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!IsClosing && CurrentContent is FileWidgetContentAdapter file)
+            {
+                file.NotifyNativeDropZeroResult();
+            }
+        });
+    }
+
+    private void NativeFileDropTarget_ImportBusyDropBlocked()
+    {
+        // Same discipline as the zero-result handler: the busy refusal fires
+        // inside the OLE Drop callback frame, so the toast leaves the frame.
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!IsClosing && CurrentContent is FileWidgetContentAdapter file)
+            {
+                file.NotifyNativeDropImportBusy();
+            }
+        });
     }
 
     private void NativeFileDropTarget_DropIntentEvent(
@@ -1795,7 +1867,8 @@ public sealed partial class ContentWidgetWindow
         return item is { } candidate &&
             ItemDropBehaviorPolicy.Resolve(candidate) is
                 ItemDropBehavior.FolderImport or
-                ItemDropBehavior.StackImport
+                ItemDropBehavior.StackImport or
+                ItemDropBehavior.RecycleBinDelete
             ? item
             : null;
     }

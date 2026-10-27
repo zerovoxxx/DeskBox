@@ -93,6 +93,7 @@ public sealed class NativeDropTarget : IDisposable
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint SIGDN_NORMALDISPLAY = 0;
     private const uint SIGDN_DESKTOPABSOLUTEPARSING = 0x80028000;
+    private const uint SIGDN_FILESYSPATH = 0x80058000;
     private const int MaxShellApplicationDropItems = 256;
     // Per-drop ceiling for materialized virtual files. Legitimate browser
     // drops stay far below this; a crafted payload cannot exhaust the disk.
@@ -129,9 +130,19 @@ public sealed class NativeDropTarget : IDisposable
     private bool _rightButtonDragActive;
     private IReadOnlyList<string> _dragPathHints = [];
 
-    private sealed record ShellApplicationDropItem(
+    private enum ShellIdListItemKind
+    {
+        Application,
+        FileSystemPath,
+        VirtualNamespace,
+    }
+
+    private sealed record ShellIdListDropItem(
+        ShellIdListItemKind Kind,
         string AppUserModelId,
-        string DisplayName);
+        string ParsingName,
+        string DisplayName,
+        string FileSystemPath);
 
     /// <summary>Fired when a drag enters the window. Provides screen coordinates and whether file data is available.</summary>
     public event Action<int, int, bool>? DragEnterEvent;
@@ -166,6 +177,21 @@ public sealed class NativeDropTarget : IDisposable
     /// Provides the requested path count. Runs on the OLE thread.
     /// </summary>
     public event Action<int>? UndisplayableDropBlocked;
+
+    /// <summary>
+    /// Fired when an accepted drop produced zero importable items after its
+    /// deferred extraction (async virtual payloads and Shell-object
+    /// materialization alike). The hover promised a link the extraction could
+    /// not honor, so the silence must surface as user feedback. Runs on the
+    /// UI continuation after the OLE callback returned.
+    /// </summary>
+    public event Action? ZeroResultDropBlocked;
+
+    /// <summary>
+    /// Fired when a drop was refused because the import pipeline was still
+    /// busy. The source kept everything. Runs inside the OLE Drop callback.
+    /// </summary>
+    public event Action? ImportBusyDropBlocked;
 
     /// <summary>
     /// Optional probe consulted inside DragEnter/DragOver/Drop to decide
@@ -226,6 +252,16 @@ public sealed class NativeDropTarget : IDisposable
     /// state cannot alter their normal move/copy behavior.
     /// </summary>
     public bool HasShellApplicationData { get; private set; }
+
+    /// <summary>
+    /// Whether the current non-filesystem payload contains materializable
+    /// Shell namespace objects outside AppsFolder (Recycle Bin, This PC, ...).
+    /// These honor the Link hover by writing a PIDL-based .lnk (pure virtual
+    /// items) or importing the file-system path the item resolves to; items
+    /// without a consumable identity still read as no-drop. Physical
+    /// CF_HDROP payloads always take precedence.
+    /// </summary>
+    public bool HasShellNamespaceData { get; private set; }
 
     internal bool IsRegistered => _registered;
 
@@ -370,7 +406,7 @@ public sealed class NativeDropTarget : IDisposable
             HasVirtualFileData,
             keyState,
             allowedEffects,
-            HasShellApplicationData,
+            HasShellApplicationData || HasShellNamespaceData,
             _defaultMoveProvider(),
             followWindows: GetFollowWindowsSetting(),
             sameVolume: GetSameVolume(_dragPathHints));
@@ -413,7 +449,7 @@ public sealed class NativeDropTarget : IDisposable
             HasVirtualFileData,
             keyState,
             allowedEffects,
-            HasShellApplicationData,
+            HasShellApplicationData || HasShellNamespaceData,
             _defaultMoveProvider(),
             followWindows: GetFollowWindowsSetting(),
             sameVolume: GetSameVolume(_dragPathHints));
@@ -469,6 +505,7 @@ public sealed class NativeDropTarget : IDisposable
 
         uint allowedEffects = effect;
         bool shellApplicationDrop = HasShellApplicationData;
+        bool shellNamespaceDrop = HasShellNamespaceData;
         bool virtualFileDrop = HasVirtualFileData;
         bool defaultMove = _defaultMoveProvider();
         bool followWindows = GetFollowWindowsSetting();
@@ -479,21 +516,24 @@ public sealed class NativeDropTarget : IDisposable
             HasVirtualFileData,
             keyState,
             allowedEffects,
-            shellApplicationDrop,
+            shellApplicationDrop || shellNamespaceDrop,
             defaultMove,
             followWindows: followWindows,
             sameVolume: GetSameVolume(_dragPathHints));
-        if ((virtualFileDrop || shellApplicationDrop) && dataObject != 0)
+        if ((virtualFileDrop || shellApplicationDrop || shellNamespaceDrop) &&
+            dataObject != 0)
         {
-            // Virtual-only drops (browser downloads, shell virtual files) and
-            // shell-application links both pay their extraction inside the
-            // source's drag loop — cross-process FILECONTENTS streams, or PIDL
-            // parsing plus .lnk materialization. Both leave the OLE callback
-            // frame entirely, per the shell's asynchronous drop protocol
-            // (IDataObjectAsyncCapability): negotiate StartOperation before
-            // returning, extract on the dedicated MTA worker, write the
-            // receipt and EndOperation after extraction, and only then run
-            // the launch/import continuation on the UI thread.
+            // Virtual-only drops (browser downloads, shell virtual files),
+            // shell-application links, and materializable Shell namespace
+            // objects (Recycle Bin, This PC, ...) all pay their extraction
+            // inside the source's drag loop — cross-process FILECONTENTS
+            // streams, or PIDL parsing plus .lnk materialization. All leave
+            // the OLE callback frame entirely, per the shell's asynchronous
+            // drop protocol (IDataObjectAsyncCapability): negotiate
+            // StartOperation before returning, extract on the dedicated MTA
+            // worker or the UI STA (shell namespace APIs fail on MTA),
+            // write the receipt and EndOperation after extraction, and only
+            // then run the launch/import continuation on the UI thread.
             return HandleDeferredDropMaterialization(
                 dataObject,
                 keyState,
@@ -504,7 +544,8 @@ public sealed class NativeDropTarget : IDisposable
                 rightButtonDrag,
                 defaultMove,
                 followWindows,
-                shellApplicationDrop);
+                shellApplicationDrop,
+                shellNamespaceDrop);
         }
 
         IReadOnlyList<string> paths = [];
@@ -625,6 +666,7 @@ public sealed class NativeDropTarget : IDisposable
             App.Log(
                 $"[DropTarget] Refused drop: import pipeline busy " +
                 $"count={paths.Count}");
+            NotifyImportBusyRefused();
             effect = NativeDropEffectPolicy.None;
             WritePerformedDropEffect(dataObject, effect);
             return S_OK;
@@ -681,7 +723,8 @@ public sealed class NativeDropTarget : IDisposable
         bool rightButtonDrag,
         bool defaultMove,
         bool followWindows,
-        bool shellApplicationDrop)
+        bool shellApplicationDrop,
+        bool shellNamespaceDrop)
     {
         // Capacity is checked BEFORE the marshal: a refused stream that is
         // never unmarshaled would leak the marshal packet plus its hold on
@@ -703,6 +746,7 @@ public sealed class NativeDropTarget : IDisposable
         if (IsImportBusy())
         {
             App.Log("[DropTarget] Refused virtual drop: import pipeline busy");
+            NotifyImportBusyRefused();
             FinishDragVisualAndState(dataObject, point, feedbackEffect);
             effect = NativeDropEffectPolicy.None;
             WritePerformedDropEffect(dataObject, effect);
@@ -714,7 +758,7 @@ public sealed class NativeDropTarget : IDisposable
         // the materialization window unchanged, so a later gesture's state
         // is never stamped by this drop's completion.
         string? launchTargetPathAtDrop =
-            !shellApplicationDrop && !rightButtonDrag
+            !shellApplicationDrop && !shellNamespaceDrop && !rightButtonDrag
                 ? LaunchTargetPathProbe?.Invoke()
                 : null;
 
@@ -768,14 +812,15 @@ public sealed class NativeDropTarget : IDisposable
             sameVolume: GetSameVolume(_dragPathHints),
             canCopy: sourceCanCopy,
             canMove: sourceCanMove);
-        bool shortcutRequested = shellApplicationDrop ||
+        bool shortcutRequested = shellApplicationDrop || shellNamespaceDrop ||
             NativeDropEffectPolicy.ShouldCreateMappedShortcut(
                 containsTemporaryFiles: true,
                 keyState);
         uint completionEffect = NativeDropEffectPolicy.ResolveCompletionEffect(
             hasExtractedPaths: true,
             allowedEffects,
-            createdShellApplicationLinks: shellApplicationDrop);
+            createdShellApplicationLinks: shellApplicationDrop ||
+                shellNamespaceDrop);
         int dropX = point.X;
         int dropY = point.Y;
         uint capturedKeyState = keyState;
@@ -783,28 +828,29 @@ public sealed class NativeDropTarget : IDisposable
         uint capturedFeedbackEffect = feedbackEffect;
         bool capturedRightButtonDrag = rightButtonDrag;
 
-        if (shellApplicationDrop)
+        if (shellApplicationDrop || shellNamespaceDrop)
         {
-            // Shell namespace APIs used by the AppsFolder extraction
-            // (SHGetNameFromIDList & friends) bind in-proc shell COM objects
-            // that fail on the MTA worker (2026-10-15 field incident:
-            // start-menu drags extracted zero items on the worker). The
-            // extraction therefore stays on the UI STA, one dispatcher turn
-            // out of the callback frame; a plain AddRef keeps the data object
-            // alive across the hop (same thread, no marshal needed) and the
-            // receipt/EndOperation run here too, satisfying the async
-            // protocol (everything happens after the Drop callback returned).
+            // Shell namespace APIs used by the AppsFolder and namespace-item
+            // extraction (SHGetNameFromIDList & friends) bind in-proc shell
+            // COM objects that fail on the MTA worker (2026-10-15 field
+            // incident: start-menu drags extracted zero items on the worker).
+            // The extraction therefore stays on the UI STA, one dispatcher
+            // turn out of the callback frame; a plain AddRef keeps the data
+            // object alive across the hop (same thread, no marshal needed)
+            // and the receipt/EndOperation run here too, satisfying the
+            // async protocol (everything happens after the Drop callback
+            // returned).
             _ = System.Runtime.InteropServices.Marshal.AddRef(dataObject);
             FinishDragVisualAndState(dataObject, point, feedbackEffect);
             App.Log(
-                "[DropTarget] NativeDrop deferred shell-app extraction to " +
-                "UI turn");
+                "[DropTarget] NativeDrop deferred shell-object extraction " +
+                "to UI turn");
             UiDispatch.PostAfterCallback(() =>
             {
                 IReadOnlyList<string> extractedPaths = [];
                 try
                 {
-                    extractedPaths = TryExtractShellApplicationShortcuts(dataObject);
+                    extractedPaths = TryExtractShellIdListItems(dataObject);
                     WritePerformedDropEffect(
                         dataObject,
                         extractedPaths.Count > 0
@@ -984,6 +1030,19 @@ public sealed class NativeDropTarget : IDisposable
     {
         if (extractedPaths.Count == 0)
         {
+            // Contract ⑫ close-out: the hover promised a link/copy the
+            // deferred extraction could not honor; surface it as feedback
+            // instead of failing silently.
+            try
+            {
+                ZeroResultDropBlocked?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                App.Log(
+                    $"[DropTarget] Zero-result notify failed: {ex.Message}");
+            }
+
             return;
         }
 
@@ -1017,6 +1076,7 @@ public sealed class NativeDropTarget : IDisposable
             App.Log(
                 $"[DropTarget] Refused deferred drop: import pipeline " +
                 $"busy count={extractedPaths.Count}");
+            NotifyImportBusyRefused();
             // The worker already receipted optimistically; the least-bad
             // recovery is deleting the materialized files so they do not
             // linger forever in the temp root.
@@ -1130,6 +1190,18 @@ public sealed class NativeDropTarget : IDisposable
         }
     }
 
+    private void NotifyImportBusyRefused()
+    {
+        try
+        {
+            ImportBusyDropBlocked?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            App.Log($"[DropTarget] Import-busy notify failed: {ex.Message}");
+        }
+    }
+
     private void InspectDragData(nint dataObject)
     {
         bool hasHDropData = TryHasHDropData(dataObject);
@@ -1137,18 +1209,34 @@ public sealed class NativeDropTarget : IDisposable
         HasVirtualFileData = NativeDropEffectPolicy.IsVirtualOnlyFileData(
             hasHDropData,
             hasVirtualDescriptorData);
-        // Strict AppsFolder classification (2026-10-15 field incident
-        // reinstated): a presence-only probe made every IDList-only drag
-        // (Explorer zip folders et al.) promise a copy/link hover it could
-        // not honor. The strict parse is gated on !hasHDrop, so its cost only
-        // ever applies to the rare shell-object drag class — ordinary file
-        // drags never pay it. The Drop-side AppsFolder extraction runs on the
-        // UI STA (see HandleDeferredDropMaterialization); zip-folder drags
-        // carry no format DeskBox can consume and correctly read as no-drop.
-        HasShellApplicationData =
-            !hasHDropData && TryHasShellApplicationData(dataObject);
+        // Strict Shell-object classification (2026-10-15 field incident
+        // reinstated; 2026-10-16 extended to materializable namespace items):
+        // a presence-only probe made every IDList-only drag (Explorer zip
+        // folders et al.) promise a copy/link hover it could not honor. The
+        // strict parse is gated on !hasHDrop, so its cost only ever applies
+        // to the rare shell-object drag class — ordinary file drags never
+        // pay it. AppsFolder items keep their application-link path; other
+        // Shell namespace items (Recycle Bin, This PC, ...) are accepted
+        // only when they carry an identity Drop can honor — a file-system
+        // path for HDROP-equivalent import, or a parsing name for PIDL-based
+        // .lnk materialization (mirrors the paste-path judgment). Items with
+        // neither still read as no-drop. The Drop-side extraction runs on
+        // the UI STA (see HandleDeferredDropMaterialization).
+        HasShellApplicationData = false;
+        HasShellNamespaceData = false;
+        if (!hasHDropData)
+        {
+            TryClassifyShellIdListDrag(
+                dataObject,
+                out bool hasApplications,
+                out bool hasNamespaceItems);
+            HasShellApplicationData = hasApplications;
+            HasShellNamespaceData = hasNamespaceItems;
+        }
+
         HasFileData =
-            hasHDropData || HasVirtualFileData || HasShellApplicationData;
+            hasHDropData || HasVirtualFileData || HasShellApplicationData ||
+            HasShellNamespaceData;
     }
 
     private void ResetDragDataState()
@@ -1156,6 +1244,7 @@ public sealed class NativeDropTarget : IDisposable
         HasFileData = false;
         HasVirtualFileData = false;
         HasShellApplicationData = false;
+        HasShellNamespaceData = false;
         _dragPathHints = [];
     }
 
@@ -1390,15 +1479,20 @@ public sealed class NativeDropTarget : IDisposable
         }
     }
 
-    private static bool TryHasShellApplicationData(IntPtr pDataObj)
+    private static void TryClassifyShellIdListDrag(
+        IntPtr pDataObj,
+        out bool hasApplications,
+        out bool hasNamespaceItems)
     {
+        hasApplications = false;
+        hasNamespaceItems = false;
         if (!TryQueryFormat(
                 pDataObj,
                 s_shellIdListFormat,
                 TYMED_HGLOBAL,
                 -1))
         {
-            return false;
+            return;
         }
 
         try
@@ -1417,12 +1511,28 @@ public sealed class NativeDropTarget : IDisposable
                     out NativeStorageMedium medium) != S_OK ||
                 medium.Content == IntPtr.Zero)
             {
-                return false;
+                return;
             }
 
             try
             {
-                return ReadShellApplicationDropItems(medium.Content).Count > 0;
+                foreach (ShellIdListDropItem item in ReadShellIdListDropItems(
+                             medium.Content))
+                {
+                    if (item.Kind == ShellIdListItemKind.Application)
+                    {
+                        hasApplications = true;
+                    }
+                    else
+                    {
+                        hasNamespaceItems = true;
+                    }
+
+                    if (hasApplications && hasNamespaceItems)
+                    {
+                        return;
+                    }
+                }
             }
             finally
             {
@@ -1431,7 +1541,8 @@ public sealed class NativeDropTarget : IDisposable
         }
         catch
         {
-            return false;
+            // Classification is best-effort: an unreadable payload keeps its
+            // honest no-drop reading.
         }
     }
 
@@ -1507,9 +1618,10 @@ public sealed class NativeDropTarget : IDisposable
         }
     }
 
-    // Internal for the materialization worker, which runs the PIDL parse
-    // and .lnk writes on its own apartment after the drop callback returned.
-    internal static IReadOnlyList<string> TryExtractShellApplicationShortcuts(
+    // Internal for the contract tests; the real callers keep it on the UI
+    // STA one dispatcher turn out of the OLE callback (see
+    // HandleDeferredDropMaterialization).
+    internal static IReadOnlyList<string> TryExtractShellIdListItems(
         IntPtr pDataObj)
     {
         if (pDataObj == IntPtr.Zero || s_shellIdListFormat == 0)
@@ -1532,40 +1644,40 @@ public sealed class NativeDropTarget : IDisposable
             if (shellIdListHr != S_OK || medium.Content == IntPtr.Zero)
             {
                 App.LogVerbose(
-                    "[DropTarget] ShellApps extraction: SHELLIDLIST GetData " +
+                    "[DropTarget] ShellIdList extraction: SHELLIDLIST GetData " +
                     $"failed hr=0x{shellIdListHr:X8} empty={medium.Content == IntPtr.Zero}");
                 return [];
             }
 
-            IReadOnlyList<ShellApplicationDropItem> applications;
+            IReadOnlyList<ShellIdListDropItem> items;
             try
             {
-                applications = ReadShellApplicationDropItems(medium.Content);
+                items = ReadShellIdListDropItems(medium.Content);
             }
             finally
             {
                 OleDropTargetNativeMethods.ReleaseStgMedium(ref medium);
             }
 
-            if (applications.Count == 0)
+            if (items.Count == 0)
             {
                 App.LogVerbose(
-                    "[DropTarget] ShellApps extraction: PIDL parse produced " +
-                    "no items (structure or AppsFolder-normalize rejection)");
+                    "[DropTarget] ShellIdList extraction: PIDL parse produced " +
+                    "no items (structure or identity rejection)");
             }
 
-            return MaterializeShellApplicationShortcuts(applications);
+            return MaterializeShellIdListItems(items);
         }
         catch (Exception ex)
         {
             App.Log(
-                $"[DropTarget] Failed to extract AppsFolder Shell items: {ex.Message}");
+                $"[DropTarget] Failed to extract Shell IDList items: {ex.Message}");
             return [];
         }
     }
 
-    private static IReadOnlyList<ShellApplicationDropItem>
-        ReadShellApplicationDropItems(IntPtr shellIdListHandle)
+    private static IReadOnlyList<ShellIdListDropItem> ReadShellIdListDropItems(
+        IntPtr shellIdListHandle)
     {
         long bufferSize = OleDropTargetNativeMethods.GlobalSize(shellIdListHandle).ToInt64();
         if (bufferSize < sizeof(uint) + (2 * sizeof(uint)) ||
@@ -1608,8 +1720,10 @@ public sealed class NativeDropTarget : IDisposable
                 return [];
             }
 
-            var applications = new List<ShellApplicationDropItem>();
+            var items = new List<ShellIdListDropItem>();
             var seenAppIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seenParsingNames = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
             for (uint index = 0; index < childCount; index++)
             {
                 int offsetPosition = checked(
@@ -1638,25 +1752,65 @@ public sealed class NativeDropTarget : IDisposable
                     string parsingName = ReadShellDisplayName(
                         absolutePidl,
                         SIGDN_DESKTOPABSOLUTEPARSING);
-                    if (!TryNormalizePackagedApplicationId(
+                    if (TryNormalizePackagedApplicationId(
                             parsingName,
-                            out string appUserModelId) ||
-                        !seenAppIds.Add(appUserModelId))
+                            out string appUserModelId))
+                    {
+                        if (!seenAppIds.Add(appUserModelId))
+                        {
+                            continue;
+                        }
+
+                        string displayName = ReadShellDisplayName(
+                            absolutePidl,
+                            SIGDN_NORMALDISPLAY);
+                        if (string.IsNullOrWhiteSpace(displayName))
+                        {
+                            displayName = appUserModelId[..appUserModelId.IndexOf('!')];
+                        }
+
+                        items.Add(new ShellIdListDropItem(
+                            ShellIdListItemKind.Application,
+                            appUserModelId,
+                            parsingName,
+                            displayName,
+                            FileSystemPath: string.Empty));
+                        continue;
+                    }
+
+                    // Non-AppsFolder namespace item: accept only an identity
+                    // Drop can honor — a file-system path imports like
+                    // CF_HDROP, a pure virtual parsing name materializes as
+                    // a PIDL-based .lnk (mirrors the paste-path judgment in
+                    // ShellClipboardHelper).
+                    string fileSystemPath = ReadShellDisplayName(
+                        absolutePidl,
+                        SIGDN_FILESYSPATH);
+                    if (!TryClassifyShellNamespaceItem(
+                            parsingName,
+                            fileSystemPath,
+                            out bool isFileSystemPath) ||
+                        !seenParsingNames.Add(parsingName))
                     {
                         continue;
                     }
 
-                    string displayName = ReadShellDisplayName(
+                    string namespaceDisplayName = ReadShellDisplayName(
                         absolutePidl,
                         SIGDN_NORMALDISPLAY);
-                    if (string.IsNullOrWhiteSpace(displayName))
+                    if (string.IsNullOrWhiteSpace(namespaceDisplayName))
                     {
-                        displayName = appUserModelId[..appUserModelId.IndexOf('!')];
+                        namespaceDisplayName = parsingName;
                     }
 
-                    applications.Add(new ShellApplicationDropItem(
-                        appUserModelId,
-                        displayName));
+                    items.Add(new ShellIdListDropItem(
+                        isFileSystemPath
+                            ? ShellIdListItemKind.FileSystemPath
+                            : ShellIdListItemKind.VirtualNamespace,
+                        AppUserModelId: string.Empty,
+                        parsingName,
+                        namespaceDisplayName,
+                        isFileSystemPath ? fileSystemPath : string.Empty));
                 }
                 finally
                 {
@@ -1664,7 +1818,7 @@ public sealed class NativeDropTarget : IDisposable
                 }
             }
 
-            return applications;
+            return items;
         }
         finally
         {
@@ -1780,10 +1934,42 @@ public sealed class NativeDropTarget : IDisposable
         return true;
     }
 
-    private static IReadOnlyList<string> MaterializeShellApplicationShortcuts(
-        IReadOnlyList<ShellApplicationDropItem> applications)
+    /// <summary>
+    /// Classifies a non-AppsFolder Shell namespace item by the identity Drop
+    /// can actually honor: a file-system path imports like CF_HDROP, a pure
+    /// virtual parsing name materializes as a PIDL-based .lnk, and anything
+    /// without a consumable identity stays no-drop. Mirrors the paste-path
+    /// <c>ShellNamespaceClipboardItem</c> judgment (an empty
+    /// SIGDN_FILESYSPATH means a purely virtual item such as This PC or the
+    /// Recycle Bin).
+    /// </summary>
+    internal static bool TryClassifyShellNamespaceItem(
+        string? parsingName,
+        string? fileSystemPath,
+        out bool isFileSystemPath)
     {
-        if (applications.Count == 0)
+        isFileSystemPath = false;
+        string candidate = parsingName?.Trim() ?? string.Empty;
+        if (candidate.Length == 0 ||
+            candidate.Length > 1024 ||
+            candidate.Contains('\0'))
+        {
+            return false;
+        }
+
+        string path = fileSystemPath?.Trim() ?? string.Empty;
+        if (path.Length > 0 && !path.Contains('\0'))
+        {
+            isFileSystemPath = true;
+        }
+
+        return true;
+    }
+
+    private static IReadOnlyList<string> MaterializeShellIdListItems(
+        IReadOnlyList<ShellIdListDropItem> items)
+    {
+        if (items.Count == 0)
         {
             return [];
         }
@@ -1794,35 +1980,59 @@ public sealed class NativeDropTarget : IDisposable
             "VirtualDrops",
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temporaryDirectory);
-        var paths = new List<string>(applications.Count);
-        foreach (ShellApplicationDropItem application in applications)
+        var paths = new List<string>(items.Count);
+        foreach (ShellIdListDropItem item in items)
         {
+            if (item.Kind == ShellIdListItemKind.FileSystemPath)
+            {
+                // HDROP-equivalent import: the namespace item resolves to a
+                // real file-system path and joins the normal transfer flow.
+                paths.Add(item.FileSystemPath);
+                continue;
+            }
+
             string fileName = FileService.SanitizeFileSystemName(
-                application.DisplayName);
+                item.DisplayName);
             if (string.IsNullOrWhiteSpace(fileName))
             {
-                fileName = "Application";
+                fileName = item.Kind == ShellIdListItemKind.Application
+                    ? "Application"
+                    : "ShellObject";
             }
 
             string shortcutPath = FileService.GetAvailablePath(
                 Path.Combine(temporaryDirectory, $"{fileName}.lnk"));
             try
             {
-                ShortcutHelper.CreateShellApplicationShortcut(
-                    shortcutPath,
-                    application.AppUserModelId,
-                    application.DisplayName);
+                if (item.Kind == ShellIdListItemKind.Application)
+                {
+                    ShortcutHelper.CreateShellApplicationShortcut(
+                        shortcutPath,
+                        item.AppUserModelId,
+                        item.DisplayName);
+                    App.Log(
+                        $"[DropTarget] Materialized AppsFolder shortcut " +
+                        $"app='{item.AppUserModelId}' name='{item.DisplayName}'");
+                }
+                else
+                {
+                    ShortcutHelper.CreateShellNamespaceShortcut(
+                        shortcutPath,
+                        item.ParsingName,
+                        item.DisplayName);
+                    App.Log(
+                        $"[DropTarget] Materialized namespace shortcut " +
+                        $"target='{item.ParsingName}' name='{item.DisplayName}'");
+                }
+
                 paths.Add(shortcutPath);
-                App.Log(
-                    $"[DropTarget] Materialized AppsFolder shortcut " +
-                    $"app='{application.AppUserModelId}' name='{application.DisplayName}'");
             }
             catch (Exception ex)
             {
                 try { File.Delete(shortcutPath); } catch { }
                 App.Log(
-                    $"[DropTarget] Failed to materialize AppsFolder shortcut " +
-                    $"app='{application.AppUserModelId}': {ex.Message}");
+                    $"[DropTarget] Failed to materialize Shell item " +
+                    $"target='{item.ParsingName}': {ex.Message}");
             }
         }
 

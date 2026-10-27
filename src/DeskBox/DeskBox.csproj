@@ -6,10 +6,10 @@
     <!-- Keep the compile-time SDK modern while declaring the supported Win10 floor explicitly. -->
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <RootNamespace>DeskBox</RootNamespace>
-    <Version>1.5.8.1</Version>
-    <AssemblyVersion>1.5.8.1</AssemblyVersion>
-    <FileVersion>1.5.8.1</FileVersion>
-    <InformationalVersion>1.5.8.1</InformationalVersion>
+    <Version>1.5.9</Version>
+    <AssemblyVersion>1.5.9.0</AssemblyVersion>
+    <FileVersion>1.5.9.0</FileVersion>
+    <InformationalVersion>1.5.9</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
@@ -243,6 +243,24 @@
     <Content Include="Assets\deskbox.svg">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+    <Content Include="Assets\deskbox-mark-slab-0.svg">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\deskbox-mark-slab-1.svg">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\deskbox-mark-slab-2.svg">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\OnboardingScene\file-txt.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\OnboardingScene\file-zip.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\OnboardingScene\file-jpg.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
     <Content Include="Assets\deskbox-tray-light.ico">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
@@ -291,6 +309,7 @@
     <EmbeddedResource Include="Strings\ar-SA.json" />
     <EmbeddedResource Include="Strings\bn-BD.json" />
     <EmbeddedResource Include="Strings\ru-RU.json" />
+    <EmbeddedResource Include="Strings\ko-KR.json" />
   </ItemGroup>
 
   <ItemGroup>

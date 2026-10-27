@@ -6,8 +6,8 @@
 ; ISCC /DDeskBoxNativeAot=1 /DDeskBoxBundledRuntime=1 /DMyAppReleaseDir=<publish 目录> DeskBox.iss
 
 #define MyAppName "DeskBox"
-#define MyAppVersion "1.5.8.1"
-#define MyAppVersionInfo "1.5.8.1"
+#define MyAppVersion "1.5.9"
+#define MyAppVersionInfo "1.5.9.0"
 #define MyAppPublisher "朱天雨"
 #define MyAppExeName "DeskBox.exe"
 #define MyAppOutputBaseName "DeskBox_Setup"
@@ -106,6 +106,7 @@ Name: "french"; MessagesFile: "Languages\French.isl"
 Name: "arabic"; MessagesFile: "Languages\Arabic.isl"
 Name: "bengali"; MessagesFile: "Languages\Bengali.islu"
 Name: "russian"; MessagesFile: "Languages\Russian.isl"
+Name: "korean"; MessagesFile: "Languages\Korean.islu"
 
 [Messages]
 #include "DeskBox.HindiBengaliMessages.iss"
@@ -293,6 +294,7 @@ begin
   else if ActiveLanguage = 'arabic' then Result := 'ar-SA'
   else if ActiveLanguage = 'bengali' then Result := 'bn-BD'
   else if ActiveLanguage = 'russian' then Result := 'ru-RU'
+  else if ActiveLanguage = 'korean' then Result := 'ko-KR'
   else if ActiveLanguage = 'chinesesimplified' then Result := 'zh-CN'
   else if ActiveLanguage = 'chinesetraditional' then Result := 'zh-TW'
   else Result := 'en-US';

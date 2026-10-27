@@ -13,7 +13,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public void ProductionInventory_IsFrozenAtFortyFilesAndNinetyThreeCalls()
+    public void ProductionInventory_IsFrozenAtFortyOneFilesAndNinetySixCalls()
     {
         var expected = new Dictionary<string, int>(StringComparer.Ordinal)
         {
@@ -29,7 +29,9 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             ["src/DeskBox/App.AotTodoNotificationLifecycleSmoke.cs"] = 1,
             ["src/DeskBox/App.AotTodoNotificationActivationSmoke.cs"] = 1,
             ["src/DeskBox/App.AotTodoNotificationForwardingSmoke.cs"] = 1,
-            ["src/DeskBox/Services/AppUpdateService.cs"] = 2,
+            // 3: update-check manifest, GitHub release fallback, and the
+            // display-only content-manifest fetch (release-notes window).
+            ["src/DeskBox/Services/AppUpdateService.cs"] = 3,
             ["src/DeskBox/Services/CitySearchService.cs"] = 1,
             ["src/DeskBox/Services/DeskBoxAttachmentHealthService.cs"] = 1,
             ["src/DeskBox/Services/DeskBoxDataBackupService.cs"] = 12,
@@ -44,6 +46,8 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             ["src/DeskBox/Services/ManagedStorageMigrationService.cs"] = 2,
             ["src/DeskBox/Services/NativeNotificationActivationEnvelopeStore.cs"] = 2,
             ["src/DeskBox/Services/QuickCaptureStore.cs"] = 2,
+            // 2: the wipe-recovery offer marker (read deserialize, atomic save serialize).
+            ["src/DeskBox/Services/RecoveryOfferStore.cs"] = 2,
             ["src/DeskBox/Services/SearchHistoryService.cs"] = 2,
             ["src/DeskBox/Services/SettingsMigrationService.cs"] = 2,
             ["src/DeskBox/Services/SettingsService.cs"] = 3,
@@ -80,8 +84,8 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             Assert.Equal(expectedCount, actual[path]);
         }
 
-        Assert.Equal(40, actual.Count);
-        Assert.Equal(93, actual.Values.Sum());
+        Assert.Equal(41, actual.Count);
+        Assert.Equal(96, actual.Values.Sum());
 
         string[] expectedContextOwners =
         [
@@ -109,6 +113,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             "src/DeskBox/Services/ManagedStorageMigrationModels.cs",
             "src/DeskBox/Services/NativeNotificationActivationEnvelopeStore.cs",
             "src/DeskBox/Services/QuickCaptureStore.cs",
+            "src/DeskBox/Services/RecoveryOfferStore.cs",
             "src/DeskBox/Services/SearchHistoryService.cs",
             "src/DeskBox/Services/SettingsService.cs",
             "src/DeskBox/Services/StartupSessionLedger.cs",
@@ -130,7 +135,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             .Order()
             .ToArray();
 
-        Assert.Equal(36, actualContextOwners.Length);
+        Assert.Equal(37, actualContextOwners.Length);
         Assert.Equal(expectedContextOwners, actualContextOwners);
     }
 
@@ -165,7 +170,6 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
 
         string[] expectedTypeInfoReferences =
         [
-            "AppUpdateJsonContext.Default.UpdateManifest",
             "AppUpdateJsonContext.Default.GitHubRelease",
             "WeatherJsonContext.Default.PredefinedCityList",
             "WeatherJsonContext.Default.GeocodingResult",
@@ -187,6 +191,12 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             Assert.Single(
                 Regex.Matches(allPhaseOneSources, Regex.Escape(reference)).Cast<Match>());
         }
+
+        // The update manifest deserializes twice: once for the installer
+        // check and once for the display-only content fetch.
+        Assert.Equal(
+            2,
+            Regex.Matches(allPhaseOneSources, Regex.Escape("AppUpdateJsonContext.Default.UpdateManifest")).Count);
 
         Assert.DoesNotContain("JsonSerializerOptions", allPhaseOneSources, StringComparison.Ordinal);
         Assert.DoesNotContain(
